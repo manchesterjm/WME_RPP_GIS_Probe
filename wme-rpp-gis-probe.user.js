@@ -23,7 +23,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.06.23.2';
+    const SCRIPT_VERSION = '2026.06.23.3';
     const LOG = '🔬 [RPP-GIS-Probe]';
 
     // Sidebar-tab UI references (populated by setupProbeTab once WME is ready).
@@ -47,11 +47,7 @@
         wrongHnCloseM: 8,      // a *different*-HN point this close suggests the RPP's HN is wrong
         minZoom: 17,           // below this, RPP data isn't reliably loaded
         maxListedPoints: 8,    // cap per-RPP point list in the console
-        // Entry/exit-point check (flag-only):
-        entryAccessRoadTypes: [17, 20], // Private Road (17) + Parking Lot Road (20): if the entry's nearest segment is one of these it's a legit access road — leave it, NEVER redirect to the named through-road (breaks routing).
-        entryRoadTypeExclude: [3, 4, 18, 19], // freeway/ramp/railroad/runway — never an RPP's access road
-        entrySegmentSearchM: 100, // only consider segments within ~this many metres of the entry point
-        goZoomLevel: 19,          // zoom used by the panel's "Go" button (house-level review)
+        goZoomLevel: 19,          // zoom used by the "Go" button (house-level review)
     };
 
     // Street-type normalization so "Springnite Drive" (WME) matches "SPRINGNITE DR" (GIS).
@@ -344,7 +340,6 @@
 
         const tally = {};
         const misplaced = [];   // → result rows with a Snap button
-        const entryFlags = [];  // → result info rows (flag-only)
         for (let idx = 0; idx < rpps.length; idx++) {
             const rpp = rpps[idx];
             setProbeStatus(`⏳ Scanning ${idx + 1}/${rpps.length} RPP(s)…`, '#06c');
@@ -380,19 +375,6 @@
                 });
             }
 
-            // Entry/exit-point check (flag-only).
-            const entry = evaluateEntry(rpp, info);
-            console.log(`%c  ↳ ENTRY [${entry.code}]: ${entry.msg}`, entryStyle(entry.code));
-            tally[entry.code] = (tally[entry.code] || 0) + 1;
-            if (entry.code === 'entry-wrong-street' || entry.code === 'entry-review') {
-                entryFlags.push({
-                    id: info.id,
-                    label: `${info.hn ?? '∅'} ${info.street || '∅'}`,
-                    msg: entry.msg,
-                    rppLon: info.lon,
-                    rppLat: info.lat,
-                });
-            }
             console.groupEnd();
         }
 
@@ -400,174 +382,13 @@
         console.log(`%c${LOG} SUMMARY — ${rpps.length} RPP(s): ${summary}`, 'color:#06c;font-weight:bold');
 
         setProbeScanning(false);
-        renderProbeResults(misplaced, entryFlags);
-        const issues = misplaced.length + entryFlags.length;
+        renderProbeResults(misplaced);
         const at = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        if (issues === 0) {
-            setProbeStatus(`✅ Done ${at} — scanned ${rpps.length} RPP(s), no issues found.<br><span style="color:#888;">${summary}</span>`, '#0a7');
+        if (misplaced.length === 0) {
+            setProbeStatus(`✅ Done ${at} — scanned ${rpps.length} RPP(s), no misplaced pins found.<br><span style="color:#888;">${summary}</span>`, '#0a7');
         } else {
-            setProbeStatus(`⚠️ Done ${at} — ${rpps.length} RPP(s): <b>${misplaced.length} misplaced</b>, <b>${entryFlags.length} entry flag(s)</b>. See below.<br><span style="color:#888;">${summary}</span>`, '#b26a00');
+            setProbeStatus(`⚠️ Done ${at} — ${rpps.length} RPP(s): <b>${misplaced.length} misplaced</b>. See below.<br><span style="color:#888;">${summary}</span>`, '#b26a00');
         }
-    }
-
-    // ---- entry/exit point analysis (flag-only) -------------------------------
-
-    let loggedNavShape = false;
-
-    function finiteLonLat(lon, lat) {
-        return (isFinite(lon) && isFinite(lat)) ? [lon, lat] : null;
-    }
-
-    // If magnitudes look like Web Mercator metres, convert to lon/lat; else pass through.
-    function mercatorAwareLonLat(a, b) {
-        if (Math.abs(a) > 180 || Math.abs(b) > 90) {
-            const lon = (a / 20037508.34) * 180;
-            const yDeg = (b / 20037508.34) * 180;
-            const lat = (180 / Math.PI) * (2 * Math.atan(Math.exp((yDeg * Math.PI) / 180)) - Math.PI / 2);
-            return finiteLonLat(lon, lat);
-        }
-        return finiteLonLat(a, b);
-    }
-
-    function rawToLonLat(raw) {
-        if (!raw) {
-            return null;
-        }
-        try {
-            if (typeof raw.getVertices === 'function' || raw.CLASS_NAME) {
-                const gj = W.userscripts.toGeoJSONGeometry(raw);
-                return finiteLonLat(gj.coordinates[0], gj.coordinates[1]);
-            }
-            if (raw.coordinates && raw.coordinates.length >= 2) {
-                return mercatorAwareLonLat(raw.coordinates[0], raw.coordinates[1]);
-            }
-            if (raw.x != null && raw.y != null) {
-                return mercatorAwareLonLat(raw.x, raw.y);
-            }
-            if (Array.isArray(raw) && raw.length >= 2) {
-                return mercatorAwareLonLat(raw[0], raw[1]);
-            }
-        } catch { /* fall through */ }
-        return null;
-    }
-
-    // Best-effort lon/lat of the RPP's primary entry/exit point (or null). Logs
-    // the raw structure once so we can confirm the shape empirically.
-    function entryPointLonLat(rpp) {
-        const eps = rpp.attributes && rpp.attributes.entryExitPoints;
-        if (!eps || !eps.length) {
-            return null;
-        }
-        const nav = eps.find((p) => (p.getEntry ? p.getEntry() : p.entry !== false)) || eps[0];
-        let raw = null;
-        try {
-            raw = (typeof nav.getPoint === 'function') ? nav.getPoint() : (nav.point || nav.geometry || nav);
-        } catch {
-            raw = nav.point || null;
-        }
-        if (!loggedNavShape) {
-            loggedNavShape = true;
-            try {
-                console.log(`${LOG} [debug] sample entry-point raw shape:`, JSON.stringify(raw));
-            } catch { /* non-serializable */ }
-        }
-        return rawToLonLat(raw);
-    }
-
-    // Nearest segment to (lon,lat) + the nearest segment whose name matches `streetName`.
-    function findEntrySegmentInfo(lon, lat, streetName) {
-        const exclude = new Set(CONFIG.entryRoadTypeExclude);
-        const access = new Set(CONFIG.entryAccessRoadTypes);
-        const pt = turf.point([lon, lat]);
-        const wantNorm = normalizeStreet(streetName);
-        let nearest = null;
-        let nearestNamed = null;
-        const segments = W.model.segments.getObjectArray();
-        for (const seg of segments) {
-            const rt = seg.attributes && seg.attributes.roadType;
-            if (rt == null || exclude.has(rt)) {
-                continue;
-            }
-            let line;
-            try {
-                const gj = W.userscripts.toGeoJSONGeometry(seg.getOLGeometry());
-                if (!gj || gj.type !== 'LineString' || !gj.coordinates || gj.coordinates.length < 2) {
-                    continue;
-                }
-                let minX = Infinity;
-                let minY = Infinity;
-                let maxX = -Infinity;
-                let maxY = -Infinity;
-                for (const c of gj.coordinates) {
-                    minX = Math.min(minX, c[0]);
-                    maxX = Math.max(maxX, c[0]);
-                    minY = Math.min(minY, c[1]);
-                    maxY = Math.max(maxY, c[1]);
-                }
-                const pad = 0.0015; // ~150m bbox reject
-                if (lon < minX - pad || lon > maxX + pad || lat < minY - pad || lat > maxY + pad) {
-                    continue;
-                }
-                line = gj;
-            } catch {
-                continue;
-            }
-            let d;
-            try {
-                d = turf.pointToLineDistance(pt, line, { units: 'kilometers' }) * 1000;
-            } catch {
-                continue;
-            }
-            if (d > CONFIG.entrySegmentSearchM) {
-                continue;
-            }
-            const st = W.model.streets.getObjectById(seg.attributes.primaryStreetID);
-            const name = (st && st.attributes && st.attributes.name) || '';
-            if (!nearest || d < nearest.dist) {
-                nearest = { name, roadType: rt, dist: d, isAccess: access.has(rt) };
-            }
-            if (wantNorm && normalizeStreet(name) === wantNorm && (!nearestNamed || d < nearestNamed.dist)) {
-                nearestNamed = { name, roadType: rt, dist: d };
-            }
-        }
-        return { nearest, nearestNamed };
-    }
-
-    function evaluateEntry(rpp, info) {
-        const ep = entryPointLonLat(rpp);
-        if (!ep) {
-            return { code: 'entry-missing', msg: 'no entry/exit point set' };
-        }
-        const { nearest, nearestNamed } = findEntrySegmentInfo(ep[0], ep[1], info.street);
-        if (!nearest) {
-            return { code: 'entry-ok', msg: 'no nearby segment to check' };
-        }
-        if (nearest.isAccess) {
-            return { code: 'entry-ok', msg: `on access road "${nearest.name || '(unnamed)'}" [type ${nearest.roadType}] ${nearest.dist.toFixed(1)}m — leave as-is` };
-        }
-        if (info.street && streetsMatch(nearest.name, info.street)) {
-            return { code: 'entry-ok', msg: `nearest "${nearest.name}" matches RPP street, ${nearest.dist.toFixed(1)}m` };
-        }
-        if (nearestNamed) {
-            return {
-                code: 'entry-wrong-street',
-                msg: `nearest is "${nearest.name || '(unnamed)'}" [type ${nearest.roadType}] ${nearest.dist.toFixed(1)}m, but RPP is "${info.street}" — a matching segment is ${nearestNamed.dist.toFixed(1)}m away (corner-lot? entry on wrong street)`,
-            };
-        }
-        return {
-            code: 'entry-review',
-            msg: `nearest is "${nearest.name || '(unnamed)'}" [type ${nearest.roadType}] ${nearest.dist.toFixed(1)}m; no "${info.street}" segment nearby — review`,
-        };
-    }
-
-    function entryStyle(code) {
-        if (code === 'entry-ok') {
-            return 'color:#0a0';
-        }
-        if (code === 'entry-missing') {
-            return 'color:#888';
-        }
-        return 'color:#d80;font-weight:bold';
     }
 
     // ---- snap (the ONLY map-writing action — reviewed, one at a time) ---------
@@ -654,21 +475,10 @@
         return row;
     }
 
-    // An entry-point flag row: info-only ("Go" to review; fix entries by hand).
-    function makeEntryRow(f) {
-        const { row } = makeRow(`${f.label} — ${f.msg}`);
-        row.appendChild(makeGoButton(f.rppLon, f.rppLat));
-        return row;
-    }
-
-    function appendResultSections(container, misplaced, entryFlags) {
+    function appendResultSections(container, misplaced) {
         if (misplaced.length) {
             container.appendChild(makeSectionHeader('MISPLACED — snap pin to its GIS point:'));
             misplaced.forEach((m) => container.appendChild(makeMisplacedRow(m)));
-        }
-        if (entryFlags.length) {
-            container.appendChild(makeSectionHeader('ENTRY-POINT FLAGS (review by hand):'));
-            entryFlags.forEach((f) => container.appendChild(makeEntryRow(f)));
         }
     }
 
@@ -700,12 +510,12 @@
 
     // Render results into the sidebar tab if it's present; otherwise fall back to
     // a floating panel (only happens if registerSidebarTab was unavailable).
-    function renderProbeResults(misplaced, entryFlags) {
+    function renderProbeResults(misplaced) {
         if (probeResultsRef) {
             clearProbeResults();
-            appendResultSections(probeResultsRef, misplaced, entryFlags);
+            appendResultSections(probeResultsRef, misplaced);
         } else {
-            refreshSnapPanel(misplaced, entryFlags);
+            refreshSnapPanel(misplaced);
         }
     }
 
@@ -746,13 +556,13 @@
     }
 
     // Floating review panel — FALLBACK only (used if the sidebar tab can't be
-    // registered). Misplaced RPPs get a Snap button; entry flags are info-only.
-    function refreshSnapPanel(misplaced, entryFlags) {
+    // registered). Misplaced RPPs get a Snap button.
+    function refreshSnapPanel(misplaced) {
         const old = document.getElementById('rpp-gis-probe-panel');
         if (old) {
             old.remove();
         }
-        if (!misplaced.length && !entryFlags.length) {
+        if (!misplaced.length) {
             return;
         }
         const panel = document.createElement('div');
@@ -766,7 +576,7 @@
         const header = document.createElement('div');
         header.style.cssText = 'padding:6px 8px;background:#0a7;color:#fff;font-weight:bold;font-size:12px;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;';
         const title = document.createElement('span');
-        title.textContent = `🔬 Review — ${misplaced.length} misplaced, ${entryFlags.length} entry flags`;
+        title.textContent = `🔬 Review — ${misplaced.length} misplaced`;
         const close = document.createElement('button');
         close.textContent = '✕';
         close.style.cssText = 'background:transparent;border:none;color:#fff;font-size:14px;cursor:pointer;';
@@ -774,7 +584,7 @@
         header.appendChild(title);
         header.appendChild(close);
         panel.appendChild(header);
-        appendResultSections(panel, misplaced, entryFlags);
+        appendResultSections(panel, misplaced);
         document.body.appendChild(panel);
     }
 
