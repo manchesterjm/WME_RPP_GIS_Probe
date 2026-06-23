@@ -26,7 +26,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.06.24.1';
+    const SCRIPT_VERSION = '2026.06.24.2';
     const LOG = '🔬 [RPP-GIS-Probe]';
 
     // Sidebar-tab UI references (populated by setupProbeTab once WME is ready).
@@ -41,6 +41,13 @@
 
     const GIS_QUERY_URL =
         'https://gis.colorado.gov/public/rest/services/Address_and_Parcel/Colorado_Public_Addresses/MapServer/0/query';
+    // Human-readable name of the authoritative source + its host (shown in the
+    // tab so you always know which GIS the probe is querying). HOST is derived
+    // from the URL so it can't drift out of sync if the endpoint changes.
+    const GIS_SOURCE_LABEL = 'State of Colorado — Public Address Composite (statewide)';
+    const GIS_SOURCE_HOST = (() => {
+        try { return new URL(GIS_QUERY_URL).hostname; } catch { return GIS_QUERY_URL; }
+    })();
 
     // Tunables (Josh can dial these as we learn what the data looks like).
     const CONFIG = {
@@ -349,7 +356,7 @@
         }
 
         const rpps = getVisibleRPPs();
-        console.log(`%c${LOG} probing ${rpps.length} visible RPP(s) — READ-ONLY, no edits.`, 'color:#0a7;font-weight:bold');
+        console.log(`%c${LOG} probing ${rpps.length} visible RPP(s) vs ${GIS_SOURCE_LABEL} [${GIS_SOURCE_HOST}] — READ-ONLY, no edits.`, 'color:#0a7;font-weight:bold');
         setProbeScanning(true);
         clearProbeResults();
         if (!rpps.length) {
@@ -404,10 +411,11 @@
         setProbeScanning(false);
         renderProbeResults(misplaced);
         const at = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const via = `<br><span style="color:#888;">${summary} · via ${GIS_SOURCE_HOST}</span>`;
         if (misplaced.length === 0) {
-            setProbeStatus(`✅ Done ${at} — scanned ${rpps.length} RPP(s), no misplaced pins found.<br><span style="color:#888;">${summary}</span>`, '#0a7');
+            setProbeStatus(`✅ Done ${at} — scanned ${rpps.length} RPP(s), no misplaced pins found.${via}`, '#0a7');
         } else {
-            setProbeStatus(`⚠️ Done ${at} — ${rpps.length} RPP(s): <b>${misplaced.length} misplaced</b>. See below.<br><span style="color:#888;">${summary}</span>`, '#b26a00');
+            setProbeStatus(`⚠️ Done ${at} — ${rpps.length} RPP(s): <b>${misplaced.length} misplaced</b>. See below.${via}`, '#b26a00');
         }
     }
 
@@ -556,7 +564,8 @@
         tabPane.innerHTML = `
             <div style="font-family:sans-serif;font-size:12px;">
               <h2 style="font-size:14px;margin:6px 0;">🔬 RPP GIS Address Probe <span style="font-weight:normal;color:#888;font-size:10px;">v${SCRIPT_VERSION}</span></h2>
-              <p style="color:#555;margin:4px 0 8px;">Read-only. Cross-checks each visible RPP's house number &amp; street against the State of Colorado authoritative GIS address points (statewide — all CO counties). The only map-writing action is a reviewed <b>Snap</b>.</p>
+              <p style="color:#555;margin:4px 0 8px;">Read-only. Cross-checks each visible RPP's house number &amp; street against the authoritative GIS address points below. The only map-writing action is a reviewed <b>Snap</b>.</p>
+              <div style="margin:4px 0 8px;padding:5px 8px;background:#eef6f3;border-left:3px solid #0a7;border-radius:3px;font-size:11px;color:#235;">🗺️ <b>GIS source:</b> ${GIS_SOURCE_LABEL}<br><span style="color:#678;">${GIS_SOURCE_HOST}</span></div>
               <button id="rpp-gis-probe-run" style="padding:7px 12px;background:#0a7;color:#fff;border:none;border-radius:5px;font-size:13px;font-weight:bold;cursor:pointer;">🔬 Probe visible RPPs</button>
               <div id="rpp-gis-probe-status" style="margin:8px 0;padding:6px 8px;background:#f3f3f3;border-radius:4px;font-size:11px;color:#444;">Idle — click <b>Probe</b> to scan the RPPs currently in view.</div>
               <div id="rpp-gis-probe-results"></div>

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WME RPP GIS Address Probe
 // @namespace    http://tampermonkey.net/
-// @version      2026.06.24.1
+// @version      2026.06.24.2
 // @description  RPP vs the State of Colorado authoritative GIS (statewide — all CO counties): flags misplaced pins, wrong/typo'd streets, and bad house numbers in a "🔬 Probe" side-panel tab. Scan is read-only; a reviewed one-click "Snap" corrects a misplaced pin. Test in WME sandbox.
 // @match        https://www.waze.com/*editor*
 // @match        https://beta.waze.com/*editor*
