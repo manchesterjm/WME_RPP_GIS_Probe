@@ -1,0 +1,725 @@
+// WME RPP GIS Address Probe — main logic (loaded via the loader's @require).
+//
+// PURPOSE: a READ-ONLY diagnostic. For each visible RPP it asks the Colorado
+// Springs authoritative address-point GIS layer "is this house number real, and
+// is the RPP sitting where that address actually is?", then logs a verdict.
+// It NEVER edits the map — no geometry moves, no address writes. Safe in sandbox.
+//
+// DATA SOURCE (same authority WME GIS Layers uses for this area):
+//   gis.coloradosprings.gov  →  GeneralUse/LandRecords/MapServer/0  ("Address Points")
+//   Fields: Add_Number (house #), FullStreet, FullAddress, City, Post_Code, SUBTYPE.
+//   Native SR is State Plane (EPSG:2232); we query inSR=outSR=4326 so everything
+//   stays in WGS84 lon/lat for distance math.
+//
+// USAGE: click the "🔬 Probe RPPs" button (bottom-left) or call rppGisProbe() in
+// the console. Watch the grouped console output; cross-check against the WME GIS
+// Layers overlay.
+
+/* global W, turf, GM_xmlhttpRequest, getWmeSdk */
+
+(function() {
+    'use strict';
+
+    const SCRIPT_NAME = 'WME RPP GIS Address Probe';
+    const LOG = '🔬 [RPP-GIS-Probe]';
+
+    // Immediate proof-of-load — fires the instant the file executes, before any WME gate.
+    // If you don't even see THIS line, the script isn't loading (loader/file-access issue).
+    console.log(`%c${LOG} script file executed — waiting for WME ready…`, 'color:#0a7');
+
+    const GIS_QUERY_URL =
+        'https://gis.coloradosprings.gov/arcgis/rest/services/GeneralUse/LandRecords/MapServer/0/query';
+
+    // Tunables (Josh can dial these as we learn what the data looks like).
+    const CONFIG = {
+        queryRadiusM: 60,      // how far around an RPP to pull authoritative points
+        wellPlacedM: 12,       // fast-path: matched point this close → definitely on the right lot, skip the neighbor check
+        misplacedMarginM: 8,   // a DIFFERENT address must be at least this much closer than the RPP's own point to call it misplaced (robust to rooftop-vs-frontyard offset; tune up = more conservative)
+        wrongHnCloseM: 8,      // a *different*-HN point this close suggests the RPP's HN is wrong
+        minZoom: 17,           // below this, RPP data isn't reliably loaded
+        maxListedPoints: 8,    // cap per-RPP point list in the console
+        // Entry/exit-point check (flag-only):
+        entryAccessRoadTypes: [17, 20], // Private Road (17) + Parking Lot Road (20): if the entry's nearest segment is one of these it's a legit access road — leave it, NEVER redirect to the named through-road (breaks routing).
+        entryRoadTypeExclude: [3, 4, 18, 19], // freeway/ramp/railroad/runway — never an RPP's access road
+        entrySegmentSearchM: 100, // only consider segments within ~this many metres of the entry point
+        goZoomLevel: 19,          // zoom used by the panel's "Go" button (house-level review)
+    };
+
+    // Street-type normalization so "Springnite Drive" (WME) matches "SPRINGNITE DR" (GIS).
+    const STREET_TYPES = {
+        DRIVE: 'DR', STREET: 'ST', AVENUE: 'AVE', ROAD: 'RD', COURT: 'CT', LANE: 'LN',
+        CIRCLE: 'CIR', BOULEVARD: 'BLVD', PLACE: 'PL', TRAIL: 'TRL', PARKWAY: 'PKWY',
+        TERRACE: 'TER', POINT: 'PT', HEIGHTS: 'HTS', SQUARE: 'SQ', HIGHWAY: 'HWY',
+        CRESCENT: 'CRES', GROVE: 'GRV', VIEW: 'VW',
+    };
+
+    let wmeSdk = null;
+
+    // ---- geometry / model helpers --------------------------------------------
+
+    function distMeters(lon1, lat1, lon2, lat2) {
+        return turf.distance(turf.point([lon1, lat1]), turf.point([lon2, lat2]), { units: 'kilometers' }) * 1000;
+    }
+
+    function getZoom() {
+        try {
+            if (wmeSdk && wmeSdk.Map && wmeSdk.Map.getZoomLevel) {
+                return wmeSdk.Map.getZoomLevel();
+            }
+        } catch { /* fall through to legacy */ }
+        try {
+            return W.map.getZoom();
+        } catch {
+            return null;
+        }
+    }
+
+    // WGS84 [west, south, east, north] for the current view, or null.
+    function getMapExtentBbox() {
+        try {
+            if (wmeSdk && wmeSdk.Map && wmeSdk.Map.getMapExtent) {
+                const e = wmeSdk.Map.getMapExtent();
+                if (Array.isArray(e) && e.length === 4) {
+                    return e;
+                }
+            }
+        } catch { /* fall through to legacy */ }
+        try {
+            const e = W.map.getExtent();   // WME v2.354: returns a WGS84 [w, s, e, n] array
+            if (Array.isArray(e) && e.length === 4) {
+                return e;
+            }
+        } catch { /* no extent available — caller will skip the in-view filter */ }
+        return null;
+    }
+
+    function venueCentroidLonLat(venue) {
+        try {
+            const geom = venue.getOLGeometry();
+            if (!geom) {
+                return null;
+            }
+            const centroid = geom.getCentroid ? geom.getCentroid() : geom;
+            const gj = W.userscripts.toGeoJSONGeometry(centroid);
+            const lon = gj.coordinates[0];
+            const lat = gj.coordinates[1];
+            if (!isFinite(lon) || !isFinite(lat)) {
+                return null;
+            }
+            return [lon, lat];
+        } catch {
+            return null;
+        }
+    }
+
+    function getVisibleRPPs() {
+        const bbox = getMapExtentBbox();
+        const out = [];
+        const venues = (W && W.model && W.model.venues && W.model.venues.objects) ? W.model.venues.objects : {};
+        for (const id in venues) {
+            const venue = W.model.venues.getObjectById(id);
+            if (!venue || !venue.attributes || !venue.attributes.categories) {
+                continue;
+            }
+            if (!venue.attributes.categories.includes('RESIDENCE_HOME')) {
+                continue;
+            }
+            const pt = venueCentroidLonLat(venue);
+            if (!pt) {
+                continue;
+            }
+            if (bbox && (pt[0] < bbox[0] || pt[0] > bbox[2] || pt[1] < bbox[1] || pt[1] > bbox[3])) {
+                continue;
+            }
+            out.push(venue);
+        }
+        return out;
+    }
+
+    function getRppInfo(venue) {
+        const pt = venueCentroidLonLat(venue) || [NaN, NaN];
+        let street = '';
+        try {
+            const st = W.model.streets.getObjectById(venue.attributes.streetID);
+            street = st?.attributes?.name || '';   // WME street name lives on .attributes.name, not .name
+        } catch { /* no street resolvable */ }
+        return {
+            id: venue.attributes.id,
+            hn: venue.attributes.houseNumber,
+            street,
+            lon: pt[0],
+            lat: pt[1],
+        };
+    }
+
+    // ---- street matching ------------------------------------------------------
+
+    function normalizeStreet(name) {
+        if (!name) {
+            return '';
+        }
+        const cleaned = String(name).toUpperCase().replace(/\./g, '').replace(/\s+/g, ' ').trim();
+        return cleaned.split(' ').map((tok) => STREET_TYPES[tok] || tok).join(' ');
+    }
+
+    function streetCore(name) {
+        const tokens = normalizeStreet(name).split(' ');
+        const typeAbbrevs = new Set(Object.values(STREET_TYPES));
+        if (tokens.length > 1 && typeAbbrevs.has(tokens[tokens.length - 1])) {
+            tokens.pop();
+        }
+        return tokens.join(' ');
+    }
+
+    function streetsMatch(a, b) {
+        return normalizeStreet(a) === normalizeStreet(b) || streetCore(a) === streetCore(b);
+    }
+
+    // ---- GIS query ------------------------------------------------------------
+
+    // Resolves to { error, points: [{hn, street, address, city, zip, subtype, lon, lat}] }.
+    function queryGisAddressPoints(lon, lat, radiusMeters) {
+        const params = new URLSearchParams({
+            f: 'json',
+            geometry: JSON.stringify({ x: lon, y: lat, spatialReference: { wkid: 4326 } }),
+            geometryType: 'esriGeometryPoint',
+            inSR: '4326',
+            outSR: '4326',
+            distance: String(radiusMeters),
+            units: 'esriSRUnit_Meter',
+            spatialRel: 'esriSpatialRelIntersects',
+            outFields: 'Add_Number,FullStreet,FullAddress,City,Post_Code,SUBTYPE',
+            returnGeometry: 'true',
+        });
+        return new Promise((resolve) => {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: `${GIS_QUERY_URL}?${params.toString()}`,
+                timeout: 15000,
+                onload: (res) => {
+                    try {
+                        const data = JSON.parse(res.responseText);
+                        if (data.error) {
+                            resolve({ error: data.error.message || 'ArcGIS error', points: [] });
+                            return;
+                        }
+                        const points = (data.features || []).map((ft) => ({
+                            hn: ft.attributes.Add_Number,
+                            street: ft.attributes.FullStreet || '',
+                            address: ft.attributes.FullAddress || '',
+                            city: ft.attributes.City || '',
+                            zip: ft.attributes.Post_Code || '',
+                            subtype: ft.attributes.SUBTYPE || '',
+                            lon: ft.geometry ? ft.geometry.x : null,
+                            lat: ft.geometry ? ft.geometry.y : null,
+                        }));
+                        resolve({ error: null, points });
+                    } catch (e) {
+                        resolve({ error: `parse error: ${e.message}`, points: [] });
+                    }
+                },
+                onerror: () => resolve({ error: 'network error (check @connect grant)', points: [] }),
+                ontimeout: () => resolve({ error: 'timeout', points: [] }),
+            });
+        });
+    }
+
+    // ---- verdict logic --------------------------------------------------------
+
+    function rppHnString(info) {
+        return (info.hn != null && String(info.hn).trim() !== '') ? String(info.hn).trim() : null;
+    }
+
+    function evaluateRpp(info, points) {
+        const annotated = points
+            .map((p) => ({
+                ...p,
+                dist: (p.lon != null && p.lat != null) ? distMeters(info.lon, info.lat, p.lon, p.lat) : Infinity,
+            }))
+            .sort((a, b) => a.dist - b.dist);
+
+        const rppHn = rppHnString(info);
+
+        if (!points.length) {
+            return { code: 'no-gis', msg: 'no authoritative points within radius (coverage gap / rural / off-area)', annotated };
+        }
+        if (rppHn == null) {
+            return { code: 'no-hn', msg: 'RPP has no house number to check', annotated };
+        }
+
+        const hnStreetMatches = annotated.filter((p) => String(p.hn) === rppHn && streetsMatch(p.street, info.street));
+        if (hnStreetMatches.length) {
+            const own = hnStreetMatches[0];
+            // Fast path: matched point essentially on top of the RPP → definitely the right lot.
+            if (own.dist <= CONFIG.wellPlacedM) {
+                return { code: 'ok', msg: `HN ${rppHn} correct & well-placed — ${own.dist.toFixed(1)}m from "${own.address}"`, target: own, annotated };
+            }
+            // Nearest-point rule: if a DIFFERENT address sits clearly closer than the RPP's own
+            // point, the pin is on the wrong lot (misplaced). Otherwise the RPP's own point is
+            // (effectively) the nearest → it's on its own lot, just offset from the GIS point
+            // (rooftop-vs-frontyard jitter — NOT an error). Robust to lot size / setback.
+            const nearestOther = annotated.find((p) => p.address !== own.address);
+            if (nearestOther && nearestOther.dist + CONFIG.misplacedMarginM < own.dist) {
+                return {
+                    code: 'misplaced',
+                    msg: `MISPLACED — pin is ${own.dist.toFixed(1)}m from its own "${own.address}", but "${nearestOther.address}" sits closer (${nearestOther.dist.toFixed(1)}m) → likely on the wrong lot; correct location (${own.lon.toFixed(6)}, ${own.lat.toFixed(6)})`,
+                    target: own,
+                    annotated,
+                };
+            }
+            return {
+                code: 'ok',
+                msg: `HN ${rppHn} on its own lot — own point is nearest at ${own.dist.toFixed(1)}m (offset from the GIS point, not misplaced)`,
+                target: own,
+                annotated,
+            };
+        }
+
+        const hnAnyMatches = annotated.filter((p) => String(p.hn) === rppHn);
+        if (hnAnyMatches.length) {
+            const n = hnAnyMatches[0];
+            return {
+                code: 'hn-diff-street',
+                msg: `HN ${rppHn} exists ${n.dist.toFixed(1)}m away but on "${n.street}" (RPP street "${info.street || '∅'}") — verify street`,
+                target: n,
+                annotated,
+            };
+        }
+
+        const closest = annotated[0];
+        if (closest && closest.dist <= CONFIG.wrongHnCloseM) {
+            return {
+                code: 'wrong-hn',
+                msg: `possible WRONG HN — closest authoritative point is ${closest.dist.toFixed(1)}m away: "${closest.address}" (HN ${closest.hn}), RPP says ${rppHn}`,
+                target: closest,
+                annotated,
+            };
+        }
+        return {
+            code: 'no-match',
+            msg: `no authoritative HN ${rppHn} nearby; closest is "${closest.address}" at ${closest.dist.toFixed(1)}m — review`,
+            target: closest,
+            annotated,
+        };
+    }
+
+    function verdictStyle(code) {
+        if (code === 'ok') {
+            return 'color:#0a0;font-weight:bold';
+        }
+        if (code === 'no-gis' || code === 'no-hn') {
+            return 'color:#888';
+        }
+        return 'color:#d80;font-weight:bold';
+    }
+
+    // ---- main probe -----------------------------------------------------------
+
+    async function probeVisibleRPPs() {
+        const zoom = getZoom();
+        if (zoom != null && zoom < CONFIG.minZoom) {
+            console.warn(`${LOG} zoom ${zoom} < ${CONFIG.minZoom} — zoom in before probing (RPP data not fully loaded).`);
+            return;
+        }
+        const rpps = getVisibleRPPs();
+        console.log(`%c${LOG} probing ${rpps.length} visible RPP(s) — READ-ONLY, no edits.`, 'color:#0a7;font-weight:bold');
+
+        const tally = {};
+        const misplaced = [];   // → panel rows with a Snap button
+        const entryFlags = [];  // → panel info rows (flag-only)
+        for (const rpp of rpps) {
+            const info = getRppInfo(rpp);
+            console.group(`${LOG} RPP ${info.id} — HN=${info.hn ?? '∅'} St="${info.street || '∅'}" @ (${info.lon.toFixed(6)}, ${info.lat.toFixed(6)})`);
+            const { error, points } = await queryGisAddressPoints(info.lon, info.lat, CONFIG.queryRadiusM);
+            if (error) {
+                console.warn(`GIS query error: ${error}`);
+                tally.error = (tally.error || 0) + 1;
+                console.groupEnd();
+                continue;
+            }
+            const verdict = evaluateRpp(info, points);
+            console.log(`GIS: ${points.length} authoritative point(s) within ${CONFIG.queryRadiusM}m`);
+            const rppHn = rppHnString(info);
+            verdict.annotated.slice(0, CONFIG.maxListedPoints).forEach((p) => {
+                const hnFlag = (rppHn != null && String(p.hn) === rppHn) ? 'HN✓' : 'HN✗';
+                const stFlag = streetsMatch(p.street, info.street) ? 'St✓' : 'St✗';
+                const d = (p.dist === Infinity) ? '?' : `${p.dist.toFixed(1)}m`;
+                console.log(`  • ${d.padStart(7)}  ${p.address || `${p.hn} ${p.street}`}  [${p.subtype || '—'}]  ${hnFlag} ${stFlag}`);
+            });
+            console.log(`%cVERDICT [${verdict.code}]: ${verdict.msg}`, verdictStyle(verdict.code));
+            tally[verdict.code] = (tally[verdict.code] || 0) + 1;
+            if (verdict.code === 'misplaced' && verdict.target) {
+                misplaced.push({
+                    id: info.id,
+                    address: verdict.target.address,
+                    dist: verdict.target.dist,
+                    lon: verdict.target.lon,      // target (GIS point) — where Snap moves the pin
+                    lat: verdict.target.lat,
+                    rppLon: info.lon,             // RPP's current location — where Go pans to
+                    rppLat: info.lat,
+                });
+            }
+
+            // Entry/exit-point check (flag-only).
+            const entry = evaluateEntry(rpp, info);
+            console.log(`%c  ↳ ENTRY [${entry.code}]: ${entry.msg}`, entryStyle(entry.code));
+            tally[entry.code] = (tally[entry.code] || 0) + 1;
+            if (entry.code === 'entry-wrong-street' || entry.code === 'entry-review') {
+                entryFlags.push({
+                    id: info.id,
+                    label: `${info.hn ?? '∅'} ${info.street || '∅'}`,
+                    msg: entry.msg,
+                    rppLon: info.lon,
+                    rppLat: info.lat,
+                });
+            }
+            console.groupEnd();
+        }
+
+        const summary = Object.entries(tally).filter(([, n]) => n).map(([k, n]) => `${k}:${n}`).join('  |  ') || '(none)';
+        console.log(`%c${LOG} SUMMARY — ${rpps.length} RPP(s): ${summary}`, 'color:#06c;font-weight:bold');
+        refreshSnapPanel(misplaced, entryFlags);
+    }
+
+    // ---- entry/exit point analysis (flag-only) -------------------------------
+
+    let loggedNavShape = false;
+
+    function finiteLonLat(lon, lat) {
+        return (isFinite(lon) && isFinite(lat)) ? [lon, lat] : null;
+    }
+
+    // If magnitudes look like Web Mercator metres, convert to lon/lat; else pass through.
+    function mercatorAwareLonLat(a, b) {
+        if (Math.abs(a) > 180 || Math.abs(b) > 90) {
+            const lon = (a / 20037508.34) * 180;
+            const yDeg = (b / 20037508.34) * 180;
+            const lat = (180 / Math.PI) * (2 * Math.atan(Math.exp((yDeg * Math.PI) / 180)) - Math.PI / 2);
+            return finiteLonLat(lon, lat);
+        }
+        return finiteLonLat(a, b);
+    }
+
+    function rawToLonLat(raw) {
+        if (!raw) {
+            return null;
+        }
+        try {
+            if (typeof raw.getVertices === 'function' || raw.CLASS_NAME) {
+                const gj = W.userscripts.toGeoJSONGeometry(raw);
+                return finiteLonLat(gj.coordinates[0], gj.coordinates[1]);
+            }
+            if (raw.coordinates && raw.coordinates.length >= 2) {
+                return mercatorAwareLonLat(raw.coordinates[0], raw.coordinates[1]);
+            }
+            if (raw.x != null && raw.y != null) {
+                return mercatorAwareLonLat(raw.x, raw.y);
+            }
+            if (Array.isArray(raw) && raw.length >= 2) {
+                return mercatorAwareLonLat(raw[0], raw[1]);
+            }
+        } catch { /* fall through */ }
+        return null;
+    }
+
+    // Best-effort lon/lat of the RPP's primary entry/exit point (or null). Logs
+    // the raw structure once so we can confirm the shape empirically.
+    function entryPointLonLat(rpp) {
+        const eps = rpp.attributes && rpp.attributes.entryExitPoints;
+        if (!eps || !eps.length) {
+            return null;
+        }
+        const nav = eps.find((p) => (p.getEntry ? p.getEntry() : p.entry !== false)) || eps[0];
+        let raw = null;
+        try {
+            raw = (typeof nav.getPoint === 'function') ? nav.getPoint() : (nav.point || nav.geometry || nav);
+        } catch {
+            raw = nav.point || null;
+        }
+        if (!loggedNavShape) {
+            loggedNavShape = true;
+            try {
+                console.log(`${LOG} [debug] sample entry-point raw shape:`, JSON.stringify(raw));
+            } catch { /* non-serializable */ }
+        }
+        return rawToLonLat(raw);
+    }
+
+    // Nearest segment to (lon,lat) + the nearest segment whose name matches `streetName`.
+    function findEntrySegmentInfo(lon, lat, streetName) {
+        const exclude = new Set(CONFIG.entryRoadTypeExclude);
+        const access = new Set(CONFIG.entryAccessRoadTypes);
+        const pt = turf.point([lon, lat]);
+        const wantNorm = normalizeStreet(streetName);
+        let nearest = null;
+        let nearestNamed = null;
+        const segments = W.model.segments.getObjectArray();
+        for (const seg of segments) {
+            const rt = seg.attributes && seg.attributes.roadType;
+            if (rt == null || exclude.has(rt)) {
+                continue;
+            }
+            let line;
+            try {
+                const gj = W.userscripts.toGeoJSONGeometry(seg.getOLGeometry());
+                if (!gj || gj.type !== 'LineString' || !gj.coordinates || gj.coordinates.length < 2) {
+                    continue;
+                }
+                let minX = Infinity;
+                let minY = Infinity;
+                let maxX = -Infinity;
+                let maxY = -Infinity;
+                for (const c of gj.coordinates) {
+                    minX = Math.min(minX, c[0]);
+                    maxX = Math.max(maxX, c[0]);
+                    minY = Math.min(minY, c[1]);
+                    maxY = Math.max(maxY, c[1]);
+                }
+                const pad = 0.0015; // ~150m bbox reject
+                if (lon < minX - pad || lon > maxX + pad || lat < minY - pad || lat > maxY + pad) {
+                    continue;
+                }
+                line = gj;
+            } catch {
+                continue;
+            }
+            let d;
+            try {
+                d = turf.pointToLineDistance(pt, line, { units: 'kilometers' }) * 1000;
+            } catch {
+                continue;
+            }
+            if (d > CONFIG.entrySegmentSearchM) {
+                continue;
+            }
+            const st = W.model.streets.getObjectById(seg.attributes.primaryStreetID);
+            const name = (st && st.attributes && st.attributes.name) || '';
+            if (!nearest || d < nearest.dist) {
+                nearest = { name, roadType: rt, dist: d, isAccess: access.has(rt) };
+            }
+            if (wantNorm && normalizeStreet(name) === wantNorm && (!nearestNamed || d < nearestNamed.dist)) {
+                nearestNamed = { name, roadType: rt, dist: d };
+            }
+        }
+        return { nearest, nearestNamed };
+    }
+
+    function evaluateEntry(rpp, info) {
+        const ep = entryPointLonLat(rpp);
+        if (!ep) {
+            return { code: 'entry-missing', msg: 'no entry/exit point set' };
+        }
+        const { nearest, nearestNamed } = findEntrySegmentInfo(ep[0], ep[1], info.street);
+        if (!nearest) {
+            return { code: 'entry-ok', msg: 'no nearby segment to check' };
+        }
+        if (nearest.isAccess) {
+            return { code: 'entry-ok', msg: `on access road "${nearest.name || '(unnamed)'}" [type ${nearest.roadType}] ${nearest.dist.toFixed(1)}m — leave as-is` };
+        }
+        if (info.street && streetsMatch(nearest.name, info.street)) {
+            return { code: 'entry-ok', msg: `nearest "${nearest.name}" matches RPP street, ${nearest.dist.toFixed(1)}m` };
+        }
+        if (nearestNamed) {
+            return {
+                code: 'entry-wrong-street',
+                msg: `nearest is "${nearest.name || '(unnamed)'}" [type ${nearest.roadType}] ${nearest.dist.toFixed(1)}m, but RPP is "${info.street}" — a matching segment is ${nearestNamed.dist.toFixed(1)}m away (corner-lot? entry on wrong street)`,
+            };
+        }
+        return {
+            code: 'entry-review',
+            msg: `nearest is "${nearest.name || '(unnamed)'}" [type ${nearest.roadType}] ${nearest.dist.toFixed(1)}m; no "${info.street}" segment nearby — review`,
+        };
+    }
+
+    function entryStyle(code) {
+        if (code === 'entry-ok') {
+            return 'color:#0a0';
+        }
+        if (code === 'entry-missing') {
+            return 'color:#888';
+        }
+        return 'color:#d80;font-weight:bold';
+    }
+
+    // ---- snap (the ONLY map-writing action — reviewed, one at a time) ---------
+
+    function snapRpp(venueId, lon, lat) {
+        if (!wmeSdk || !wmeSdk.DataModel || !wmeSdk.DataModel.Venues) {
+            return { ok: false, err: 'SDK Venues unavailable' };
+        }
+        try {
+            wmeSdk.DataModel.Venues.updateVenue({
+                venueId,
+                geometry: { type: 'Point', coordinates: [lon, lat] },
+            });
+            return { ok: true };
+        } catch (e) {
+            return { ok: false, err: e.message };
+        }
+    }
+
+    // Pan + zoom the WME map to a location (read-only; just moves the view).
+    function goToRpp(lon, lat) {
+        const lonLat = { lon, lat };
+        try {
+            if (wmeSdk && wmeSdk.Map && wmeSdk.Map.setMapCenter) {
+                wmeSdk.Map.setMapCenter({ lonLat, zoomLevel: CONFIG.goZoomLevel });
+                return;
+            }
+        } catch { /* fall back to legacy */ }
+        try {
+            W.map.setCenter(lonLat, CONFIG.goZoomLevel);
+        } catch (e) {
+            console.warn(`${LOG} go-to failed:`, e.message);
+        }
+    }
+
+    function makeGoButton(lon, lat) {
+        const b = document.createElement('button');
+        b.textContent = 'Go';
+        b.title = 'Pan & zoom the map to this RPP';
+        b.style.cssText = 'padding:3px 8px;background:#06c;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:11px;';
+        b.addEventListener('click', () => goToRpp(lon, lat));
+        return b;
+    }
+
+    function makeRow(text) {
+        const row = document.createElement('div');
+        row.style.cssText = 'padding:5px 8px;border-bottom:1px solid #eee;font-size:11px;display:flex;align-items:center;gap:8px;';
+        const span = document.createElement('span');
+        span.textContent = text;
+        span.style.cssText = 'flex:1;';
+        row.appendChild(span);
+        return { row, span };
+    }
+
+    // Floating review panel: misplaced RPPs get a Snap button; entry flags are info-only.
+    function refreshSnapPanel(misplaced, entryFlags) {
+        const old = document.getElementById('rpp-gis-probe-panel');
+        if (old) {
+            old.remove();
+        }
+        if (!misplaced.length && !entryFlags.length) {
+            return;
+        }
+        const panel = document.createElement('div');
+        panel.id = 'rpp-gis-probe-panel';
+        panel.style.cssText = [
+            'position:fixed', 'top:60px', 'right:12px', 'z-index:10000', 'width:360px',
+            'max-height:70vh', 'overflow:auto', 'background:#fff', 'border:1px solid #999',
+            'border-radius:6px', 'box-shadow:0 2px 10px rgba(0,0,0,.35)', 'font-family:sans-serif',
+        ].join(';');
+
+        const header = document.createElement('div');
+        header.style.cssText = 'padding:6px 8px;background:#0a7;color:#fff;font-weight:bold;font-size:12px;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;';
+        const title = document.createElement('span');
+        title.textContent = `🔬 Review — ${misplaced.length} misplaced, ${entryFlags.length} entry flags`;
+        const close = document.createElement('button');
+        close.textContent = '✕';
+        close.style.cssText = 'background:transparent;border:none;color:#fff;font-size:14px;cursor:pointer;';
+        close.addEventListener('click', () => panel.remove());
+        header.appendChild(title);
+        header.appendChild(close);
+        panel.appendChild(header);
+
+        if (misplaced.length) {
+            const h = document.createElement('div');
+            h.textContent = 'MISPLACED — snap pin to its GIS point:';
+            h.style.cssText = 'padding:5px 8px;font-size:11px;font-weight:bold;color:#444;background:#f6f6f6;';
+            panel.appendChild(h);
+            misplaced.forEach((m) => {
+                const { row, span } = makeRow(`${m.address} — ${m.dist.toFixed(0)}m off`);
+                const btn = document.createElement('button');
+                btn.textContent = 'Snap';
+                btn.style.cssText = 'padding:3px 8px;background:#0a7;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:11px;';
+                btn.addEventListener('click', () => {
+                    const res = snapRpp(m.id, m.lon, m.lat);
+                    if (res.ok) {
+                        span.textContent = `✓ snapped — ${m.address}`;
+                        span.style.color = '#0a0';
+                        btn.remove();
+                    } else {
+                        span.textContent = `✗ ${m.address}: ${res.err}`;
+                        span.style.color = '#c00';
+                    }
+                });
+                row.appendChild(makeGoButton(m.rppLon, m.rppLat));
+                row.appendChild(btn);
+                panel.appendChild(row);
+            });
+        }
+
+        if (entryFlags.length) {
+            const h = document.createElement('div');
+            h.textContent = 'ENTRY-POINT FLAGS (review by hand):';
+            h.style.cssText = 'padding:5px 8px;font-size:11px;font-weight:bold;color:#444;background:#f6f6f6;';
+            panel.appendChild(h);
+            entryFlags.forEach((f) => {
+                const { row } = makeRow(`${f.label} — ${f.msg}`);
+                row.appendChild(makeGoButton(f.rppLon, f.rppLat));
+                panel.appendChild(row);
+            });
+        }
+
+        document.body.appendChild(panel);
+    }
+
+    // ---- UI + bootstrap -------------------------------------------------------
+
+    function addProbeButton() {
+        if (document.getElementById('rpp-gis-probe-btn')) {
+            return;
+        }
+        const btn = document.createElement('button');
+        btn.id = 'rpp-gis-probe-btn';
+        btn.textContent = '🔬 Probe RPPs';
+        btn.title = 'READ-ONLY: cross-check visible RPP house numbers vs Colorado Springs GIS address points (logs to console; no map edits)';
+        btn.style.cssText = [
+            'position:fixed', 'bottom:12px', 'left:12px', 'z-index:10000',
+            'padding:8px 12px', 'background:#0a7', 'color:#fff', 'border:none',
+            'border-radius:6px', 'font-size:13px', 'font-weight:bold', 'cursor:pointer',
+            'box-shadow:0 2px 6px rgba(0,0,0,.3)',
+        ].join(';');
+        btn.addEventListener('click', () => {
+            probeVisibleRPPs().catch((e) => console.error(`${LOG} probe failed:`, e));
+        });
+        document.body.appendChild(btn);
+    }
+
+    function onReady() {
+        console.log(`%c${LOG} loaded. Scan is read-only; the review panel's "Snap" buttons are the ONLY action that edits the map. Click "🔬 Probe RPPs" (bottom-left) or run rppGisProbe().`, 'color:#0a7;font-weight:bold');
+        addProbeButton();
+    }
+
+    // Bind the WME SDK if it's available — OPTIONAL. We mostly use legacy reads
+    // (W.model / W.map), so the probe works even if the SDK never binds.
+    function bindSdkWhenReady() {
+        if (typeof getWmeSdk !== 'function') {
+            return;
+        }
+        const sdkReady = window.SDK_INITIALIZED || Promise.resolve();
+        sdkReady.then(() => {
+            try {
+                wmeSdk = getWmeSdk({ scriptId: 'wme-rpp-gis-probe', scriptName: SCRIPT_NAME });
+            } catch (e) {
+                console.warn(`${LOG} SDK bind failed (legacy reads only):`, e.message);
+            }
+        }).catch((e) => console.warn(`${LOG} SDK init error (legacy reads only):`, e.message));
+    }
+
+    function startProbeScript() {
+        bindSdkWhenReady();
+        onReady();
+    }
+
+    // Expose for manual console use.
+    window.rppGisProbe = () => probeVisibleRPPs().catch((e) => console.error(`${LOG} probe failed:`, e));
+
+    // Entry point — mirror the RPP fixer: run when WME signals ready (not on a
+    // poll of window.SDK_INITIALIZED, which Tampermonkey's sandbox never exposes).
+    if (W?.userscripts?.state?.isReady) {
+        startProbeScript();
+    } else {
+        document.addEventListener('wme-ready', startProbeScript, { once: true });
+    }
+})();
