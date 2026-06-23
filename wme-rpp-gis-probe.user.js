@@ -5,14 +5,15 @@
 // is the RPP sitting where that address actually is?", then logs a verdict.
 // It NEVER edits the map — no geometry moves, no address writes. Safe in sandbox.
 //
-// DATA SOURCE — STATEWIDE Colorado (covers all CO counties, not just COSP):
-//   gis.colorado.gov → Address_and_Parcel/Colorado_Public_Addresses/MapServer/0
-//   ("Colorado_Public_Address_Composite" — the State's aggregate of county/local
-//   address points). Native SR is already WGS84 (4326), point geometry.
-//   Street is split into components (PreDir/PreType/StreetName/PostType/PostDir)
-//   → composeStreet() joins them. Fields: AddrNum, AddrFull, PlaceName (city),
-//   Zipcode, County, Place_Type. Switched from the COSP-only city service
-//   2026-06-23 so the probe works anywhere in Colorado.
+// DATA SOURCE — LOCAL-FIRST across Colorado (see the GIS source registry below):
+//   Prefer a LOCAL county/city address-point service whose bbox covers the RPP
+//   (e.g. City of Colorado Springs — gis.coloradosprings.gov), because local data
+//   is fresher than the state aggregate. Where no local source is configured — or
+//   the local one errors / returns nothing — fall back to the STATEWIDE composite
+//   (gis.colorado.gov → Colorado_Public_Addresses, all CO counties). Each source
+//   maps its own field names via its fields() fn; we query inSR=outSR=4326 so any
+//   native SR is reprojected to WGS84. The "🔬 Probe" tab shows which source each
+//   scan used (local / local→statewide fallback / statewide-no-local).
 //
 // USAGE: open the "🔬 Probe" tab in the WME scripts side panel and click
 // "Probe visible RPPs" (or call rppGisProbe() in the console). The tab shows a
@@ -26,7 +27,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.06.24.2';
+    const SCRIPT_VERSION = '2026.06.24.3';
     const LOG = '🔬 [RPP-GIS-Probe]';
 
     // Sidebar-tab UI references (populated by setupProbeTab once WME is ready).
@@ -39,15 +40,67 @@
     // If you don't even see THIS line, the script isn't loading (loader/file-access issue).
     console.log(`%c${LOG} script file executed — waiting for WME ready…`, 'color:#0a7');
 
-    const GIS_QUERY_URL =
-        'https://gis.colorado.gov/public/rest/services/Address_and_Parcel/Colorado_Public_Addresses/MapServer/0/query';
-    // Human-readable name of the authoritative source + its host (shown in the
-    // tab so you always know which GIS the probe is querying). HOST is derived
-    // from the URL so it can't drift out of sync if the endpoint changes.
-    const GIS_SOURCE_LABEL = 'State of Colorado — Public Address Composite (statewide)';
-    const GIS_SOURCE_HOST = (() => {
-        try { return new URL(GIS_QUERY_URL).hostname; } catch { return GIS_QUERY_URL; }
-    })();
+    // ── GIS source registry (LOCAL-FIRST) ────────────────────────────────────
+    // Local county/city authoritative address points are fresher than the state
+    // aggregate, so we prefer them: the first LOCAL_SOURCES entry whose bbox
+    // contains the RPP wins. If none matches — OR the chosen local service errors
+    // / returns nothing — we fall back to the STATEWIDE source (all CO). The tab
+    // shows which source a scan actually used (incl. "fallback"). `fields(a)` maps
+    // a returned feature's raw attributes (we request outFields=* so each source
+    // can use its own field names) to {hn, street, address, city, zip, subtype}.
+    // bbox is [west, south, east, north] in WGS84.
+    const STATEWIDE_SOURCE = {
+        id: 'co-state',
+        name: 'State of Colorado — Public Address Composite',
+        url: 'https://gis.colorado.gov/public/rest/services/Address_and_Parcel/Colorado_Public_Addresses/MapServer/0/query',
+        fields: (a) => ({
+            hn: a.AddrNum,
+            street: composeStreet(a),
+            address: a.AddrFull || '',
+            city: a.PlaceName || '',
+            zip: a.Zipcode || '',
+            county: a.County || '',
+            subtype: a.Place_Type || '',
+        }),
+    };
+
+    const LOCAL_SOURCES = [
+        {
+            id: 'cosp',
+            name: 'City of Colorado Springs',
+            url: 'https://gis.coloradosprings.gov/arcgis/rest/services/GeneralUse/LandRecords/MapServer/0/query',
+            bbox: [-104.93, 38.74, -104.62, 39.07], // COSP metro (approx); edges fall back to statewide on empty
+            fields: (a) => ({
+                hn: a.Add_Number,
+                street: a.FullStreet || '',
+                address: a.FullAddress || '',
+                city: a.City || '',
+                zip: a.Post_Code || '',
+                subtype: a.SUBTYPE || '',
+            }),
+        },
+        // TODO Douglas County — apps.douglas.co.us/geopendata/rest/services/Property/
+        //   Address_Account/MapServer/0 ("Address Points with Account Data", SR 2232).
+        //   Returned HTTP 502 on 2026-06-23 (origin down). When reachable, confirm its
+        //   field names (AddrNum/Street/City/Zip equivalents) + bbox and add an entry
+        //   here; until then Douglas County auto-uses the statewide fallback. Remember
+        //   to add @connect apps.douglas.co.us to the loader.
+    ];
+
+    function pickLocalSource(lon, lat) {
+        if (lon == null || lat == null || !isFinite(lon) || !isFinite(lat)) {
+            return null;
+        }
+        return LOCAL_SOURCES.find((s) =>
+            s.bbox && lon >= s.bbox[0] && lon <= s.bbox[2] && lat >= s.bbox[1] && lat <= s.bbox[3]) || null;
+    }
+
+    function sourceHost(src) {
+        try { return new URL(src.url).hostname; } catch { return src.url; }
+    }
+
+    // Configured local jurisdictions, for the tab's persistent "source" line.
+    const LOCAL_SOURCE_NAMES = LOCAL_SOURCES.map((s) => s.name).join(', ') || '(none configured yet)';
 
     // Tunables (Josh can dial these as we learn what the data looks like).
     const CONFIG = {
@@ -204,8 +257,12 @@
             .join(' ');
     }
 
-    // Resolves to { error, points: [{hn, street, address, city, zip, county, subtype, lon, lat}] }.
-    function queryGisAddressPoints(lon, lat, radiusMeters) {
+    // Query ONE source's address-point service around (lon,lat). Resolves to
+    // { error, points: [{hn, street, address, city, zip, subtype, lon, lat}] }.
+    // outFields=* so each source's own field names are available to its fields()
+    // mapper; we query inSR=outSR=4326 so any native SR (State Plane, etc.) is
+    // reprojected to WGS84 server-side for distance math.
+    function queryOneSource(source, lon, lat, radiusMeters) {
         const params = new URLSearchParams({
             f: 'json',
             where: '1=1',
@@ -216,15 +273,19 @@
             distance: String(radiusMeters),
             units: 'esriSRUnit_Meter',
             spatialRel: 'esriSpatialRelIntersects',
-            outFields: 'AddrNum,PreDir,PreType,StreetName,PostType,PostDir,AddrFull,PlaceName,Zipcode,County,Place_Type',
+            outFields: '*',
             returnGeometry: 'true',
         });
         return new Promise((resolve) => {
             GM_xmlhttpRequest({
                 method: 'GET',
-                url: `${GIS_QUERY_URL}?${params.toString()}`,
+                url: `${source.url}?${params.toString()}`,
                 timeout: 15000,
                 onload: (res) => {
+                    if (res.status >= 400) {
+                        resolve({ error: `HTTP ${res.status}`, points: [] });
+                        return;
+                    }
                     try {
                         const data = JSON.parse(res.responseText);
                         if (data.error) {
@@ -232,15 +293,15 @@
                             return;
                         }
                         const points = (data.features || []).map((ft) => {
-                            const a = ft.attributes;
+                            const mapped = source.fields(ft.attributes || {});
                             return {
-                                hn: a.AddrNum,
-                                street: composeStreet(a),
-                                address: a.AddrFull || '',
-                                city: a.PlaceName || '',
-                                zip: a.Zipcode || '',
-                                county: a.County || '',
-                                subtype: a.Place_Type || '',
+                                hn: mapped.hn,
+                                street: mapped.street || '',
+                                address: mapped.address || '',
+                                city: mapped.city || '',
+                                zip: mapped.zip || '',
+                                county: mapped.county || '',
+                                subtype: mapped.subtype || '',
                                 lon: ft.geometry ? ft.geometry.x : null,
                                 lat: ft.geometry ? ft.geometry.y : null,
                             };
@@ -356,7 +417,6 @@
         }
 
         const rpps = getVisibleRPPs();
-        console.log(`%c${LOG} probing ${rpps.length} visible RPP(s) vs ${GIS_SOURCE_LABEL} [${GIS_SOURCE_HOST}] — READ-ONLY, no edits.`, 'color:#0a7;font-weight:bold');
         setProbeScanning(true);
         clearProbeResults();
         if (!rpps.length) {
@@ -365,14 +425,31 @@
             return;
         }
 
+        // Pick the GIS source ONCE for this scan, by the view centre: prefer a
+        // local county/city service whose bbox covers it, else the statewide
+        // composite. (A single WME view sits within one jurisdiction.) If the
+        // chosen local source errors mid-scan, switch to statewide for the rest.
+        const vb = getMapExtentBbox();
+        const center = vb ? [(vb[0] + vb[2]) / 2, (vb[1] + vb[3]) / 2] : [getRppInfo(rpps[0]).lon, getRppInfo(rpps[0]).lat];
+        const requestedLocal = pickLocalSource(center[0], center[1]);
+        let activeSource = requestedLocal || STATEWIDE_SOURCE;
+        let usedFallback = false;
+        console.log(`%c${LOG} probing ${rpps.length} visible RPP(s) vs ${activeSource.name} [${sourceHost(activeSource)}] — READ-ONLY, no edits.`, 'color:#0a7;font-weight:bold');
+
         const tally = {};
         const misplaced = [];   // → result rows with a Snap button
         for (let idx = 0; idx < rpps.length; idx++) {
             const rpp = rpps[idx];
-            setProbeStatus(`⏳ Scanning ${idx + 1}/${rpps.length} RPP(s)…`, '#06c');
+            setProbeStatus(`⏳ Scanning ${idx + 1}/${rpps.length} via ${sourceHost(activeSource)}…`, '#06c');
             const info = getRppInfo(rpp);
             console.group(`${LOG} RPP ${info.id} — HN=${info.hn ?? '∅'} St="${info.street || '∅'}" @ (${info.lon.toFixed(6)}, ${info.lat.toFixed(6)})`);
-            const { error, points } = await queryGisAddressPoints(info.lon, info.lat, CONFIG.queryRadiusM);
+            let { error, points } = await queryOneSource(activeSource, info.lon, info.lat, CONFIG.queryRadiusM);
+            if (error && activeSource.id !== STATEWIDE_SOURCE.id) {
+                console.warn(`${LOG} ${activeSource.name} failed (${error}) → falling back to ${STATEWIDE_SOURCE.name} for the rest of this scan.`);
+                usedFallback = true;
+                activeSource = STATEWIDE_SOURCE;
+                ({ error, points } = await queryOneSource(activeSource, info.lon, info.lat, CONFIG.queryRadiusM));
+            }
             if (error) {
                 console.warn(`GIS query error: ${error}`);
                 tally.error = (tally.error || 0) + 1;
@@ -411,11 +488,22 @@
         setProbeScanning(false);
         renderProbeResults(misplaced);
         const at = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        const via = `<br><span style="color:#888;">${summary} · via ${GIS_SOURCE_HOST}</span>`;
-        if (misplaced.length === 0) {
-            setProbeStatus(`✅ Done ${at} — scanned ${rpps.length} RPP(s), no misplaced pins found.${via}`, '#0a7');
+
+        // Describe the source actually used: local, local-with-fallback, or
+        // statewide-because-no-local-configured.
+        let srcDesc;
+        if (usedFallback) {
+            srcDesc = `🗺️ ${STATEWIDE_SOURCE.name} — <b>fallback</b> (${requestedLocal.name} unavailable) · ${sourceHost(STATEWIDE_SOURCE)}`;
+        } else if (activeSource.id === STATEWIDE_SOURCE.id) {
+            srcDesc = `🗺️ ${STATEWIDE_SOURCE.name} · ${sourceHost(STATEWIDE_SOURCE)} <span style="color:#888;">(no local source configured for this area)</span>`;
         } else {
-            setProbeStatus(`⚠️ Done ${at} — ${rpps.length} RPP(s): <b>${misplaced.length} misplaced</b>. See below.${via}`, '#b26a00');
+            srcDesc = `🗺️ ${activeSource.name} <b>(local)</b> · ${sourceHost(activeSource)}`;
+        }
+        const foot = `<br><span style="color:#235;">${srcDesc}</span><br><span style="color:#888;">${summary}</span>`;
+        if (misplaced.length === 0) {
+            setProbeStatus(`✅ Done ${at} — scanned ${rpps.length} RPP(s), no misplaced pins found.${foot}`, '#0a7');
+        } else {
+            setProbeStatus(`⚠️ Done ${at} — ${rpps.length} RPP(s): <b>${misplaced.length} misplaced</b>. See below.${foot}`, '#b26a00');
         }
     }
 
@@ -565,7 +653,7 @@
             <div style="font-family:sans-serif;font-size:12px;">
               <h2 style="font-size:14px;margin:6px 0;">🔬 RPP GIS Address Probe <span style="font-weight:normal;color:#888;font-size:10px;">v${SCRIPT_VERSION}</span></h2>
               <p style="color:#555;margin:4px 0 8px;">Read-only. Cross-checks each visible RPP's house number &amp; street against the authoritative GIS address points below. The only map-writing action is a reviewed <b>Snap</b>.</p>
-              <div style="margin:4px 0 8px;padding:5px 8px;background:#eef6f3;border-left:3px solid #0a7;border-radius:3px;font-size:11px;color:#235;">🗺️ <b>GIS source:</b> ${GIS_SOURCE_LABEL}<br><span style="color:#678;">${GIS_SOURCE_HOST}</span></div>
+              <div style="margin:4px 0 8px;padding:5px 8px;background:#eef6f3;border-left:3px solid #0a7;border-radius:3px;font-size:11px;color:#235;">🗺️ <b>GIS source:</b> local-first — uses the county/city service where configured (${LOCAL_SOURCE_NAMES}), otherwise the State of Colorado composite (${sourceHost(STATEWIDE_SOURCE)}). Each scan shows which it used.</div>
               <button id="rpp-gis-probe-run" style="padding:7px 12px;background:#0a7;color:#fff;border:none;border-radius:5px;font-size:13px;font-weight:bold;cursor:pointer;">🔬 Probe visible RPPs</button>
               <div id="rpp-gis-probe-status" style="margin:8px 0;padding:6px 8px;background:#f3f3f3;border-radius:4px;font-size:11px;color:#444;">Idle — click <b>Probe</b> to scan the RPPs currently in view.</div>
               <div id="rpp-gis-probe-results"></div>
