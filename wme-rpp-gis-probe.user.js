@@ -27,7 +27,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.06.24.3';
+    const SCRIPT_VERSION = '2026.06.24.4';
     const LOG = '🔬 [RPP-GIS-Probe]';
 
     // Sidebar-tab UI references (populated by setupProbeTab once WME is ready).
@@ -79,12 +79,24 @@
                 subtype: a.SUBTYPE || '',
             }),
         },
-        // TODO Douglas County — apps.douglas.co.us/geopendata/rest/services/Property/
-        //   Address_Account/MapServer/0 ("Address Points with Account Data", SR 2232).
-        //   Returned HTTP 502 on 2026-06-23 (origin down). When reachable, confirm its
-        //   field names (AddrNum/Street/City/Zip equivalents) + bbox and add an entry
-        //   here; until then Douglas County auto-uses the statewide fallback. Remember
-        //   to add @connect apps.douglas.co.us to the loader.
+        {
+            id: 'douglas',
+            name: 'Douglas County',
+            // Same Esri-hosted FeatureServer WME GIS Layers uses (the county's own
+            // apps.douglas.co.us server 502s; this Esri mirror is reliable). Note
+            // STREET_NAME_FULL is the full ADDRESS ("230 THIRD ST"), so build the
+            // bare street from the split fields instead.
+            url: 'https://services.arcgis.com/seTexOicoRXDvRsJ/ArcGIS/rest/services/Address/FeatureServer/0/query',
+            bbox: [-105.33, 39.12, -104.55, 39.57], // Douglas County extent
+            fields: (a) => ({
+                hn: a.ADDRESS_NUMBER,
+                street: joinStreet([a.STREET_PREDIRECTION_CODE, a.STREET_NAME, a.STREET_TYPE_CODE, a.STREET_POSTDIRECTION_CODE]),
+                address: a.STREET_NAME_FULL || '',
+                city: a.POSTAL_NAME || '',
+                zip: a.ZIP_CODE || '',
+                subtype: a.ADDRESS_USE || '',
+            }),
+        },
     ];
 
     function pickLocalSource(lon, lat) {
@@ -245,16 +257,17 @@
 
     // ---- GIS query ------------------------------------------------------------
 
-    // The statewide address composite splits the street across components
-    // (pre-directional, pre-type, name, post-type, post-directional). Join the
-    // non-empty parts in reading order, e.g. PreDir=N + StreetName=ACADEMY +
-    // PostType=BLVD → "N ACADEMY BLVD". (streetsMatch/normalizeStreet handle case
-    // + type abbreviations downstream.)
+    // Join non-empty street parts in reading order, e.g. ["N","ACADEMY","BLVD"] →
+    // "N ACADEMY BLVD". Used by sources whose schema splits the street into
+    // directional/name/type columns. (streetsMatch/normalizeStreet handle case +
+    // type abbreviations downstream.)
+    function joinStreet(parts) {
+        return parts.map((p) => (p == null ? '' : String(p).trim())).filter(Boolean).join(' ');
+    }
+
+    // The statewide composite's component column names.
     function composeStreet(a) {
-        return [a.PreDir, a.PreType, a.StreetName, a.PostType, a.PostDir]
-            .map((p) => (p == null ? '' : String(p).trim()))
-            .filter(Boolean)
-            .join(' ');
+        return joinStreet([a.PreDir, a.PreType, a.StreetName, a.PostType, a.PostDir]);
     }
 
     // Query ONE source's address-point service around (lon,lat). Resolves to
