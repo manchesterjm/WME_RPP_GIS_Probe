@@ -1,15 +1,18 @@
 // WME RPP GIS Address Probe — main logic (loaded via the loader's @require).
 //
-// PURPOSE: a READ-ONLY diagnostic. For each visible RPP it asks the Colorado
-// Springs authoritative address-point GIS layer "is this house number real, and
+// PURPOSE: a READ-ONLY diagnostic. For each visible RPP it asks the State of
+// Colorado authoritative address-point GIS layer "is this house number real, and
 // is the RPP sitting where that address actually is?", then logs a verdict.
 // It NEVER edits the map — no geometry moves, no address writes. Safe in sandbox.
 //
-// DATA SOURCE (same authority WME GIS Layers uses for this area):
-//   gis.coloradosprings.gov  →  GeneralUse/LandRecords/MapServer/0  ("Address Points")
-//   Fields: Add_Number (house #), FullStreet, FullAddress, City, Post_Code, SUBTYPE.
-//   Native SR is State Plane (EPSG:2232); we query inSR=outSR=4326 so everything
-//   stays in WGS84 lon/lat for distance math.
+// DATA SOURCE — STATEWIDE Colorado (covers all CO counties, not just COSP):
+//   gis.colorado.gov → Address_and_Parcel/Colorado_Public_Addresses/MapServer/0
+//   ("Colorado_Public_Address_Composite" — the State's aggregate of county/local
+//   address points). Native SR is already WGS84 (4326), point geometry.
+//   Street is split into components (PreDir/PreType/StreetName/PostType/PostDir)
+//   → composeStreet() joins them. Fields: AddrNum, AddrFull, PlaceName (city),
+//   Zipcode, County, Place_Type. Switched from the COSP-only city service
+//   2026-06-23 so the probe works anywhere in Colorado.
 //
 // USAGE: open the "🔬 Probe" tab in the WME scripts side panel and click
 // "Probe visible RPPs" (or call rppGisProbe() in the console). The tab shows a
@@ -23,7 +26,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.06.23.3';
+    const SCRIPT_VERSION = '2026.06.24.1';
     const LOG = '🔬 [RPP-GIS-Probe]';
 
     // Sidebar-tab UI references (populated by setupProbeTab once WME is ready).
@@ -37,7 +40,7 @@
     console.log(`%c${LOG} script file executed — waiting for WME ready…`, 'color:#0a7');
 
     const GIS_QUERY_URL =
-        'https://gis.coloradosprings.gov/arcgis/rest/services/GeneralUse/LandRecords/MapServer/0/query';
+        'https://gis.colorado.gov/public/rest/services/Address_and_Parcel/Colorado_Public_Addresses/MapServer/0/query';
 
     // Tunables (Josh can dial these as we learn what the data looks like).
     const CONFIG = {
@@ -182,10 +185,23 @@
 
     // ---- GIS query ------------------------------------------------------------
 
-    // Resolves to { error, points: [{hn, street, address, city, zip, subtype, lon, lat}] }.
+    // The statewide address composite splits the street across components
+    // (pre-directional, pre-type, name, post-type, post-directional). Join the
+    // non-empty parts in reading order, e.g. PreDir=N + StreetName=ACADEMY +
+    // PostType=BLVD → "N ACADEMY BLVD". (streetsMatch/normalizeStreet handle case
+    // + type abbreviations downstream.)
+    function composeStreet(a) {
+        return [a.PreDir, a.PreType, a.StreetName, a.PostType, a.PostDir]
+            .map((p) => (p == null ? '' : String(p).trim()))
+            .filter(Boolean)
+            .join(' ');
+    }
+
+    // Resolves to { error, points: [{hn, street, address, city, zip, county, subtype, lon, lat}] }.
     function queryGisAddressPoints(lon, lat, radiusMeters) {
         const params = new URLSearchParams({
             f: 'json',
+            where: '1=1',
             geometry: JSON.stringify({ x: lon, y: lat, spatialReference: { wkid: 4326 } }),
             geometryType: 'esriGeometryPoint',
             inSR: '4326',
@@ -193,7 +209,7 @@
             distance: String(radiusMeters),
             units: 'esriSRUnit_Meter',
             spatialRel: 'esriSpatialRelIntersects',
-            outFields: 'Add_Number,FullStreet,FullAddress,City,Post_Code,SUBTYPE',
+            outFields: 'AddrNum,PreDir,PreType,StreetName,PostType,PostDir,AddrFull,PlaceName,Zipcode,County,Place_Type',
             returnGeometry: 'true',
         });
         return new Promise((resolve) => {
@@ -208,16 +224,20 @@
                             resolve({ error: data.error.message || 'ArcGIS error', points: [] });
                             return;
                         }
-                        const points = (data.features || []).map((ft) => ({
-                            hn: ft.attributes.Add_Number,
-                            street: ft.attributes.FullStreet || '',
-                            address: ft.attributes.FullAddress || '',
-                            city: ft.attributes.City || '',
-                            zip: ft.attributes.Post_Code || '',
-                            subtype: ft.attributes.SUBTYPE || '',
-                            lon: ft.geometry ? ft.geometry.x : null,
-                            lat: ft.geometry ? ft.geometry.y : null,
-                        }));
+                        const points = (data.features || []).map((ft) => {
+                            const a = ft.attributes;
+                            return {
+                                hn: a.AddrNum,
+                                street: composeStreet(a),
+                                address: a.AddrFull || '',
+                                city: a.PlaceName || '',
+                                zip: a.Zipcode || '',
+                                county: a.County || '',
+                                subtype: a.Place_Type || '',
+                                lon: ft.geometry ? ft.geometry.x : null,
+                                lat: ft.geometry ? ft.geometry.y : null,
+                            };
+                        });
                         resolve({ error: null, points });
                     } catch (e) {
                         resolve({ error: `parse error: ${e.message}`, points: [] });
@@ -532,11 +552,11 @@
         }
         const { tabLabel, tabPane } = reg;
         tabLabel.innerText = '🔬 Probe';
-        tabLabel.title = 'RPP GIS Address Probe — read-only cross-check of visible RPPs vs Colorado Springs GIS address points';
+        tabLabel.title = 'RPP GIS Address Probe — read-only cross-check of visible RPPs vs the State of Colorado GIS address points';
         tabPane.innerHTML = `
             <div style="font-family:sans-serif;font-size:12px;">
               <h2 style="font-size:14px;margin:6px 0;">🔬 RPP GIS Address Probe <span style="font-weight:normal;color:#888;font-size:10px;">v${SCRIPT_VERSION}</span></h2>
-              <p style="color:#555;margin:4px 0 8px;">Read-only. Cross-checks each visible RPP's house number &amp; street against Colorado Springs authoritative GIS address points. The only map-writing action is a reviewed <b>Snap</b>.</p>
+              <p style="color:#555;margin:4px 0 8px;">Read-only. Cross-checks each visible RPP's house number &amp; street against the State of Colorado authoritative GIS address points (statewide — all CO counties). The only map-writing action is a reviewed <b>Snap</b>.</p>
               <button id="rpp-gis-probe-run" style="padding:7px 12px;background:#0a7;color:#fff;border:none;border-radius:5px;font-size:13px;font-weight:bold;cursor:pointer;">🔬 Probe visible RPPs</button>
               <div id="rpp-gis-probe-status" style="margin:8px 0;padding:6px 8px;background:#f3f3f3;border-radius:4px;font-size:11px;color:#444;">Idle — click <b>Probe</b> to scan the RPPs currently in view.</div>
               <div id="rpp-gis-probe-results"></div>
@@ -595,7 +615,7 @@
         const btn = document.createElement('button');
         btn.id = 'rpp-gis-probe-btn';
         btn.textContent = '🔬 Probe RPPs';
-        btn.title = 'READ-ONLY: cross-check visible RPP house numbers vs Colorado Springs GIS address points (logs to console; no map edits)';
+        btn.title = 'READ-ONLY: cross-check visible RPP house numbers vs the State of Colorado GIS address points (logs to console; no map edits)';
         btn.style.cssText = [
             'position:fixed', 'bottom:12px', 'left:12px', 'z-index:10000',
             'padding:8px 12px', 'background:#0a7', 'color:#fff', 'border:none',
