@@ -11,9 +11,11 @@
 //   Native SR is State Plane (EPSG:2232); we query inSR=outSR=4326 so everything
 //   stays in WGS84 lon/lat for distance math.
 //
-// USAGE: click the "🔬 Probe RPPs" button (bottom-left) or call rppGisProbe() in
-// the console. Watch the grouped console output; cross-check against the WME GIS
-// Layers overlay.
+// USAGE: open the "🔬 Probe" tab in the WME scripts side panel and click
+// "Probe visible RPPs" (or call rppGisProbe() in the console). The tab shows a
+// live status (scanning N/N → done, with a "no issues" / issue summary) and the
+// reviewable result rows. Grouped console output has the per-RPP detail; cross-
+// check against the WME GIS Layers overlay.
 
 /* global W, turf, GM_xmlhttpRequest, getWmeSdk */
 
@@ -21,7 +23,14 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
+    const SCRIPT_VERSION = '2026.06.23.2';
     const LOG = '🔬 [RPP-GIS-Probe]';
+
+    // Sidebar-tab UI references (populated by setupProbeTab once WME is ready).
+    let probePaneRef = null;
+    let probeStatusRef = null;
+    let probeResultsRef = null;
+    let probeButtonRef = null;
 
     // Immediate proof-of-load — fires the instant the file executes, before any WME gate.
     // If you don't even see THIS line, the script isn't loading (loader/file-access issue).
@@ -319,15 +328,26 @@
         const zoom = getZoom();
         if (zoom != null && zoom < CONFIG.minZoom) {
             console.warn(`${LOG} zoom ${zoom} < ${CONFIG.minZoom} — zoom in before probing (RPP data not fully loaded).`);
+            setProbeStatus(`⚠️ Zoom in to level ${CONFIG.minZoom}+ before probing (RPP data isn't fully loaded at zoom ${zoom}).`, '#b26a00');
             return;
         }
+
         const rpps = getVisibleRPPs();
         console.log(`%c${LOG} probing ${rpps.length} visible RPP(s) — READ-ONLY, no edits.`, 'color:#0a7;font-weight:bold');
+        setProbeScanning(true);
+        clearProbeResults();
+        if (!rpps.length) {
+            setProbeScanning(false);
+            setProbeStatus('No RPPs in view — pan/zoom to an area with residential point places, then probe.', '#444');
+            return;
+        }
 
         const tally = {};
-        const misplaced = [];   // → panel rows with a Snap button
-        const entryFlags = [];  // → panel info rows (flag-only)
-        for (const rpp of rpps) {
+        const misplaced = [];   // → result rows with a Snap button
+        const entryFlags = [];  // → result info rows (flag-only)
+        for (let idx = 0; idx < rpps.length; idx++) {
+            const rpp = rpps[idx];
+            setProbeStatus(`⏳ Scanning ${idx + 1}/${rpps.length} RPP(s)…`, '#06c');
             const info = getRppInfo(rpp);
             console.group(`${LOG} RPP ${info.id} — HN=${info.hn ?? '∅'} St="${info.street || '∅'}" @ (${info.lon.toFixed(6)}, ${info.lat.toFixed(6)})`);
             const { error, points } = await queryGisAddressPoints(info.lon, info.lat, CONFIG.queryRadiusM);
@@ -378,7 +398,16 @@
 
         const summary = Object.entries(tally).filter(([, n]) => n).map(([k, n]) => `${k}:${n}`).join('  |  ') || '(none)';
         console.log(`%c${LOG} SUMMARY — ${rpps.length} RPP(s): ${summary}`, 'color:#06c;font-weight:bold');
-        refreshSnapPanel(misplaced, entryFlags);
+
+        setProbeScanning(false);
+        renderProbeResults(misplaced, entryFlags);
+        const issues = misplaced.length + entryFlags.length;
+        const at = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        if (issues === 0) {
+            setProbeStatus(`✅ Done ${at} — scanned ${rpps.length} RPP(s), no issues found.<br><span style="color:#888;">${summary}</span>`, '#0a7');
+        } else {
+            setProbeStatus(`⚠️ Done ${at} — ${rpps.length} RPP(s): <b>${misplaced.length} misplaced</b>, <b>${entryFlags.length} entry flag(s)</b>. See below.<br><span style="color:#888;">${summary}</span>`, '#b26a00');
+        }
     }
 
     // ---- entry/exit point analysis (flag-only) -------------------------------
@@ -593,7 +622,131 @@
         return { row, span };
     }
 
-    // Floating review panel: misplaced RPPs get a Snap button; entry flags are info-only.
+    // ---- result rows (shared by the sidebar tab and the floating fallback) ----
+
+    function makeSectionHeader(text) {
+        const h = document.createElement('div');
+        h.textContent = text;
+        h.style.cssText = 'padding:5px 8px;font-size:11px;font-weight:bold;color:#444;background:#f6f6f6;margin-top:6px;';
+        return h;
+    }
+
+    // A misplaced-RPP row: "Go" pans to the pin, "Snap" moves the pin to its GIS
+    // point (the ONLY map-writing action — reviewed, one at a time).
+    function makeMisplacedRow(m) {
+        const { row, span } = makeRow(`${m.address} — ${m.dist.toFixed(0)}m off`);
+        const btn = document.createElement('button');
+        btn.textContent = 'Snap';
+        btn.style.cssText = 'padding:3px 8px;background:#0a7;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:11px;';
+        btn.addEventListener('click', () => {
+            const res = snapRpp(m.id, m.lon, m.lat);
+            if (res.ok) {
+                span.textContent = `✓ snapped — ${m.address}`;
+                span.style.color = '#0a0';
+                btn.remove();
+            } else {
+                span.textContent = `✗ ${m.address}: ${res.err}`;
+                span.style.color = '#c00';
+            }
+        });
+        row.appendChild(makeGoButton(m.rppLon, m.rppLat));
+        row.appendChild(btn);
+        return row;
+    }
+
+    // An entry-point flag row: info-only ("Go" to review; fix entries by hand).
+    function makeEntryRow(f) {
+        const { row } = makeRow(`${f.label} — ${f.msg}`);
+        row.appendChild(makeGoButton(f.rppLon, f.rppLat));
+        return row;
+    }
+
+    function appendResultSections(container, misplaced, entryFlags) {
+        if (misplaced.length) {
+            container.appendChild(makeSectionHeader('MISPLACED — snap pin to its GIS point:'));
+            misplaced.forEach((m) => container.appendChild(makeMisplacedRow(m)));
+        }
+        if (entryFlags.length) {
+            container.appendChild(makeSectionHeader('ENTRY-POINT FLAGS (review by hand):'));
+            entryFlags.forEach((f) => container.appendChild(makeEntryRow(f)));
+        }
+    }
+
+    // ---- sidebar tab UI -------------------------------------------------------
+
+    function setProbeStatus(html, color) {
+        if (!probeStatusRef) {
+            return;
+        }
+        probeStatusRef.innerHTML = html;
+        probeStatusRef.style.color = color || '#444';
+    }
+
+    function setProbeScanning(on) {
+        if (!probeButtonRef) {
+            return;
+        }
+        probeButtonRef.disabled = on;
+        probeButtonRef.textContent = on ? '⏳ Scanning…' : '🔬 Probe visible RPPs';
+        probeButtonRef.style.opacity = on ? '0.6' : '1';
+        probeButtonRef.style.cursor = on ? 'default' : 'pointer';
+    }
+
+    function clearProbeResults() {
+        if (probeResultsRef) {
+            probeResultsRef.innerHTML = '';
+        }
+    }
+
+    // Render results into the sidebar tab if it's present; otherwise fall back to
+    // a floating panel (only happens if registerSidebarTab was unavailable).
+    function renderProbeResults(misplaced, entryFlags) {
+        if (probeResultsRef) {
+            clearProbeResults();
+            appendResultSections(probeResultsRef, misplaced, entryFlags);
+        } else {
+            refreshSnapPanel(misplaced, entryFlags);
+        }
+    }
+
+    // ---- bootstrap ------------------------------------------------------------
+
+    function setupProbeTab() {
+        let reg;
+        try {
+            reg = W.userscripts.registerSidebarTab('rpp-gis-probe');
+        } catch (e) {
+            console.warn(`${LOG} sidebar tab unavailable — falling back to a floating button:`, e.message);
+            addProbeButton();
+            return;
+        }
+        const { tabLabel, tabPane } = reg;
+        tabLabel.innerText = '🔬 Probe';
+        tabLabel.title = 'RPP GIS Address Probe — read-only cross-check of visible RPPs vs Colorado Springs GIS address points';
+        tabPane.innerHTML = `
+            <div style="font-family:sans-serif;font-size:12px;">
+              <h2 style="font-size:14px;margin:6px 0;">🔬 RPP GIS Address Probe <span style="font-weight:normal;color:#888;font-size:10px;">v${SCRIPT_VERSION}</span></h2>
+              <p style="color:#555;margin:4px 0 8px;">Read-only. Cross-checks each visible RPP's house number &amp; street against Colorado Springs authoritative GIS address points. The only map-writing action is a reviewed <b>Snap</b>.</p>
+              <button id="rpp-gis-probe-run" style="padding:7px 12px;background:#0a7;color:#fff;border:none;border-radius:5px;font-size:13px;font-weight:bold;cursor:pointer;">🔬 Probe visible RPPs</button>
+              <div id="rpp-gis-probe-status" style="margin:8px 0;padding:6px 8px;background:#f3f3f3;border-radius:4px;font-size:11px;color:#444;">Idle — click <b>Probe</b> to scan the RPPs currently in view.</div>
+              <div id="rpp-gis-probe-results"></div>
+            </div>`;
+        probePaneRef = tabPane;
+        probeStatusRef = tabPane.querySelector('#rpp-gis-probe-status');
+        probeResultsRef = tabPane.querySelector('#rpp-gis-probe-results');
+        probeButtonRef = tabPane.querySelector('#rpp-gis-probe-run');
+        probeButtonRef.addEventListener('click', () => {
+            probeVisibleRPPs().catch((e) => {
+                console.error(`${LOG} probe failed:`, e);
+                setProbeScanning(false);
+                setProbeStatus(`✗ Probe failed: ${e.message}`, '#c00');
+            });
+        });
+        console.log(`%c${LOG} ready — "🔬 Probe" tab added to the scripts side panel. Scan is read-only; "Snap" is the only map edit.`, 'color:#0a7;font-weight:bold');
+    }
+
+    // Floating review panel — FALLBACK only (used if the sidebar tab can't be
+    // registered). Misplaced RPPs get a Snap button; entry flags are info-only.
     function refreshSnapPanel(misplaced, entryFlags) {
         const old = document.getElementById('rpp-gis-probe-panel');
         if (old) {
@@ -621,50 +774,9 @@
         header.appendChild(title);
         header.appendChild(close);
         panel.appendChild(header);
-
-        if (misplaced.length) {
-            const h = document.createElement('div');
-            h.textContent = 'MISPLACED — snap pin to its GIS point:';
-            h.style.cssText = 'padding:5px 8px;font-size:11px;font-weight:bold;color:#444;background:#f6f6f6;';
-            panel.appendChild(h);
-            misplaced.forEach((m) => {
-                const { row, span } = makeRow(`${m.address} — ${m.dist.toFixed(0)}m off`);
-                const btn = document.createElement('button');
-                btn.textContent = 'Snap';
-                btn.style.cssText = 'padding:3px 8px;background:#0a7;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:11px;';
-                btn.addEventListener('click', () => {
-                    const res = snapRpp(m.id, m.lon, m.lat);
-                    if (res.ok) {
-                        span.textContent = `✓ snapped — ${m.address}`;
-                        span.style.color = '#0a0';
-                        btn.remove();
-                    } else {
-                        span.textContent = `✗ ${m.address}: ${res.err}`;
-                        span.style.color = '#c00';
-                    }
-                });
-                row.appendChild(makeGoButton(m.rppLon, m.rppLat));
-                row.appendChild(btn);
-                panel.appendChild(row);
-            });
-        }
-
-        if (entryFlags.length) {
-            const h = document.createElement('div');
-            h.textContent = 'ENTRY-POINT FLAGS (review by hand):';
-            h.style.cssText = 'padding:5px 8px;font-size:11px;font-weight:bold;color:#444;background:#f6f6f6;';
-            panel.appendChild(h);
-            entryFlags.forEach((f) => {
-                const { row } = makeRow(`${f.label} — ${f.msg}`);
-                row.appendChild(makeGoButton(f.rppLon, f.rppLat));
-                panel.appendChild(row);
-            });
-        }
-
+        appendResultSections(panel, misplaced, entryFlags);
         document.body.appendChild(panel);
     }
-
-    // ---- UI + bootstrap -------------------------------------------------------
 
     function addProbeButton() {
         if (document.getElementById('rpp-gis-probe-btn')) {
@@ -687,8 +799,7 @@
     }
 
     function onReady() {
-        console.log(`%c${LOG} loaded. Scan is read-only; the review panel's "Snap" buttons are the ONLY action that edits the map. Click "🔬 Probe RPPs" (bottom-left) or run rppGisProbe().`, 'color:#0a7;font-weight:bold');
-        addProbeButton();
+        setupProbeTab();
     }
 
     // Bind the WME SDK if it's available — OPTIONAL. We mostly use legacy reads
