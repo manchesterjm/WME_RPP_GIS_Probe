@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.21.16';
+    const SCRIPT_VERSION = '2026.07.21.17';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -1272,12 +1272,34 @@
 
     // ---- scan ----------------------------------------------------------------
 
+    // The ACTIVE VIEW, slightly padded — every model sweep below clips to it
+    // (v.17, Josh: "it is scanning areas of the map that are not in the active
+    // view"). The WME model retains everything panned across this session, so
+    // without the clip the street family / RPP sweep / dedupe reached loaded
+    // same-named streets kilometers away.
+    function paddedViewBbox() {
+        const b = getMapExtentBbox();
+        if (!b) {
+            return null;
+        }
+        const pad = 0.0015;   // ≈150 m — keeps edge-of-screen context without re-opening the far-model hole
+        return [b[0] - pad, b[1] - pad, b[2] + pad, b[3] + pad];
+    }
+
+    function coordInBbox(lon, lat, b) {
+        return lon >= b[0] && lon <= b[2] && lat >= b[1] && lat <= b[3];
+    }
+
+    function lineTouchesBbox(coords, b) {
+        return coords.some((c) => coordInBbox(c[0], c[1], b));
+    }
+
     // Loaded unnamed PLR segments (roadType 20, no primary street) — the
     // "houses on an unnamed parking-lot-road offshoot" detector (2026-07-21).
     // When one of these sits closer to a GIS point than the named street does,
     // the CO convention is an RPP addressed to the parent road (stop point then
     // dragged onto the PLR by hand — no SDK write path for navigationPoints).
-    function loadedPlrSegments() {
+    function loadedPlrSegments(viewBbox) {
         const plrs = [];
         const segObjs = (W && W.model && W.model.segments && W.model.segments.objects) ? W.model.segments.objects : {};
         for (const sid in segObjs) {
@@ -1286,7 +1308,8 @@
                 continue;
             }
             const seg = wmeSdk.DataModel.Segments.getById({ segmentId: attrs.id });
-            if (seg && seg.geometry && seg.geometry.coordinates && seg.geometry.coordinates.length >= 2) {
+            if (seg && seg.geometry && seg.geometry.coordinates && seg.geometry.coordinates.length >= 2
+                && (!viewBbox || lineTouchesBbox(seg.geometry.coordinates, viewBbox))) {
                 plrs.push({ id: attrs.id, line: turf.lineString(seg.geometry.coordinates) });
             }
         }
@@ -1300,7 +1323,7 @@
     // (v.15 — street-object ids miss city-variant duplicates like the
     // "No city"/"Parker" pair on one road), with a geometric fallback: an RPP
     // with an unresolvable street still covers if it sits in the corridor.
-    function existingRppNumbers(segInfos, corridor) {
+    function existingRppNumbers(segInfos, corridor, viewBbox) {
         const nums = new Set();
         const venueObjs = (W && W.model && W.model.venues && W.model.venues.objects) ? W.model.venues.objects : {};
         for (const vid in venueObjs) {
@@ -1313,6 +1336,12 @@
             if (norm == null) {
                 continue;
             }
+            const pt = venueCentroidLonLat(venue);
+            // View clip (v.17): a same-named street's RPPs from a far-off loaded
+            // area must not suppress candidates here.
+            if (viewBbox && (!pt || !coordInBbox(pt[0], pt[1], viewBbox))) {
+                continue;
+            }
             let street = '';
             try {
                 street = W.model.streets.getObjectById(attrs.streetID)?.attributes?.name || '';
@@ -1321,7 +1350,6 @@
                 nums.add(norm);
                 continue;
             }
-            const pt = venueCentroidLonLat(venue);
             if (pt && segInfos.some((si) => metersToLine(pt[0], pt[1], si.line) <= corridor)) {
                 nums.add(norm);
             }
@@ -1332,7 +1360,7 @@
     // Loaded segments sharing a primary street with the selection — the HN
     // dedupe universe AND the snap-target candidates (numbers near a segment end
     // may belong on the neighboring same-street segment).
-    function sameStreetFamily(streetIds) {
+    function sameStreetFamily(streetIds, viewBbox) {
         const family = [];
         const segObjs = (W && W.model && W.model.segments && W.model.segments.objects) ? W.model.segments.objects : {};
         for (const sid in segObjs) {
@@ -1342,7 +1370,8 @@
                 continue;
             }
             const seg = wmeSdk.DataModel.Segments.getById({ segmentId: attrs.id });
-            if (seg && seg.geometry && seg.geometry.coordinates && seg.geometry.coordinates.length >= 2) {
+            if (seg && seg.geometry && seg.geometry.coordinates && seg.geometry.coordinates.length >= 2
+                && (!viewBbox || lineTouchesBbox(seg.geometry.coordinates, viewBbox))) {
                 family.push({ id: attrs.id, line: turf.lineString(seg.geometry.coordinates) });
             }
         }
@@ -1402,7 +1431,8 @@
             }
 
             const streetIds = new Set(segInfos.map((s) => s.primaryStreetId).filter((x) => x != null));
-            const family = sameStreetFamily(streetIds);
+            const viewBbox = paddedViewBbox();
+            const family = sameStreetFamily(streetIds, viewBbox);
             const familyIds = new Set(family.map((f) => f.id));
             setHnStatus(`⏳ Fetching existing house numbers for ${familyIds.size} same-street segment(s)…`, '#06c');
 
@@ -1418,8 +1448,8 @@
                     existingNums.add(normHn(a.number));
                 }
             }
-            const rppNums = existingRppNumbers(segInfos, hnCorridorM());
-            const plrSegs = loadedPlrSegments();
+            const rppNums = existingRppNumbers(segInfos, hnCorridorM(), viewBbox);
+            const plrSegs = loadedPlrSegments(viewBbox);
 
             setHnStatus('⏳ Querying GIS address points along the selection…', '#06c');
             const gis = await queryGisAlongSegments(segInfos);
