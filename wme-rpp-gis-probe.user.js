@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.21.26';
+    const SCRIPT_VERSION = '2026.07.21.27';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -926,6 +926,9 @@
         // wrong-hn / hn-diff-street / no-match → report-only rows (v.21: these
         // were console-only; a found problem showed an empty tab).
         const review = [];
+        // EVERY scanned RPP with its pin→GIS-point distance (v.27, Josh: "so I
+        // know the RPPs being seen actually show on GIS").
+        const allScanned = [];
         for (let idx = 0; idx < rpps.length; idx++) {
             const rpp = rpps[idx];
             setProbeStatus(`⏳ Scanning ${idx + 1}/${rpps.length} via ${sourceHost(activeSource)}…`, '#06c');
@@ -974,6 +977,17 @@
                     rppLat: info.lat,
                 });
             }
+            allScanned.push({
+                hn: rppHn ?? '∅',
+                street: info.street || '∅',
+                code: verdict.code,
+                // pin → its verdict target (own GIS point for ok/misplaced;
+                // nearest relevant point otherwise); null = nothing in range.
+                distM: (verdict.target && isFinite(verdict.target.dist)) ? verdict.target.dist : null,
+                msg: verdict.msg,
+                rppLon: info.lon,
+                rppLat: info.lat,
+            });
 
             console.groupEnd();
         }
@@ -982,7 +996,7 @@
         console.log(`%c${LOG} SUMMARY — ${rpps.length} RPP(s): ${summary}`, 'color:#06c;font-weight:bold');
 
         setProbeScanning(false);
-        renderProbeResults(misplaced, review);
+        renderProbeResults(misplaced, review, allScanned);
         const at = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
         // Describe the source actually used: local, local-with-fallback, or
@@ -1122,7 +1136,7 @@
 
     // Render results into the sidebar tab if it's present; otherwise fall back to
     // a floating panel (only happens if registerSidebarTab was unavailable).
-    function renderProbeResults(misplaced, review) {
+    function renderProbeResults(misplaced, review, allScanned) {
         if (probeResultsRef) {
             clearProbeResults();
             appendResultSections(probeResultsRef, misplaced);
@@ -1130,6 +1144,21 @@
                 probeResultsRef.appendChild(makeSectionHeader('REVIEW — other verdicts (console has per-point detail):'));
                 review.forEach((r) => {
                     const { row } = makeRow(`[${r.code}] ${r.hn} — ${r.street}`);
+                    row.appendChild(makeGoButton(r.rppLon, r.rppLat));
+                    probeResultsRef.appendChild(row);
+                });
+            }
+            // Every scanned RPP with its measured pin→GIS distance (v.27) —
+            // the at-a-glance "does GIS actually have this one" audit.
+            if (allScanned && allScanned.length) {
+                probeResultsRef.appendChild(makeSectionHeader('ALL SCANNED — pin → GIS point distance:'));
+                allScanned.forEach((r) => {
+                    const d = (r.distM == null) ? 'no GIS point in range' : `${r.distM.toFixed(0)}m`;
+                    const { row, span } = makeRow(`${r.hn} — ${r.street} · ${r.code} · ${d}`);
+                    span.title = r.msg;
+                    if (r.distM == null) {
+                        span.style.color = '#c00';
+                    }
                     row.appendChild(makeGoButton(r.rppLon, r.rppLat));
                     probeResultsRef.appendChild(row);
                 });
