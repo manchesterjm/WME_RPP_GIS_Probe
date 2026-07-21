@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.21.18';
+    const SCRIPT_VERSION = '2026.07.21.19';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -1394,15 +1394,33 @@
             setHnStatus('Select a road segment first.', '#444');
             return;
         }
-        const capped = ids.length > HN_CONFIG.maxSegmentsPerScan;
-        const scanIds = ids.slice(0, HN_CONFIG.maxSegmentsPerScan);
-
         setHnScanning(true);
         if (hnResultsRef) {
             hnResultsRef.innerHTML = '';
         }
 
         try {
+            // v.19 ROOT-CAUSE fix for "getting stuff miles away": the SELECTION
+            // itself was never view-clipped — "select entire street" (or a
+            // selection surviving a pan) made the scan sample GIS along
+            // segments anywhere on the map. Only VISIBLE selected segments are
+            // scanned now; the off-view remainder is reported, not walked.
+            const scanBbox = paddedViewBbox();
+            const visibleIds = scanBbox
+                ? ids.filter((id) => {
+                    const seg = wmeSdk.DataModel.Segments.getById({ segmentId: id });
+                    return seg && seg.geometry && lineTouchesBbox(seg.geometry.coordinates, scanBbox);
+                })
+                : ids;
+            const offView = ids.length - visibleIds.length;
+            const capped = visibleIds.length > HN_CONFIG.maxSegmentsPerScan;
+            const scanIds = visibleIds.slice(0, HN_CONFIG.maxSegmentsPerScan);
+            if (!scanIds.length) {
+                setHnScanning(false);
+                setHnStatus(`✗ None of the ${ids.length} selected segment(s) are in the current view — pan to the part of the street you want to work, then rescan.`, '#c00');
+                return;
+            }
+
             // Per-segment info; skip segments whose street isn't resolvable (the RPP
             // fixer's v4.5.2 lesson: never act on an unloaded street).
             const segInfos = [];
@@ -1545,7 +1563,8 @@
                 ? `${STATEWIDE_SOURCE.name} — fallback · ${sourceHost(STATEWIDE_SOURCE)}`
                 : `${gis.source.name}${gis.source.id === STATEWIDE_SOURCE.id ? '' : ' (local)'} · ${sourceHost(gis.source)}`;
             const notes = [
-                capped ? `first ${HN_CONFIG.maxSegmentsPerScan} of ${ids.length} selected segments` : '',
+                offView ? `${offView} selected segment(s) OFF-VIEW skipped — pan there and rescan for the rest` : '',
+                capped ? `first ${HN_CONFIG.maxSegmentsPerScan} of ${visibleIds.length} visible selected segments` : '',
                 skipped.length ? `${skipped.length} segment(s) skipped (street not loaded)` : '',
             ].filter(Boolean).join(' · ');
             const onStreet = presentCount + rppCoveredCount + missing.length;
