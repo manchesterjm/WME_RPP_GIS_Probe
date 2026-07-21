@@ -20,6 +20,17 @@
 // live status (scanning N/N → done, with a "no issues" / issue summary) and the
 // reviewable result rows. Grouped console output has the per-RPP detail; cross-
 // check against the WME GIS Layers overlay.
+//
+// ── 🔢 HN FILLER (second tab, added 2026-07-21) ──────────────────────────────
+// Select road segment(s) → "Scan selected" cross-references the street's
+// EXISTING WME house numbers (SDK fetchHouseNumbers = server state) against the
+// authoritative GIS address points along the segment (same local-first source
+// registry as the probe) and lists the numbers that exist in GIS but are MISSING
+// from the map. Each row has a reviewed one-click "Add" that creates the house
+// number at the GIS point, snapped to the nearest same-street segment (SDK
+// DataModel.HouseNumbers.addHouseNumber — lands in the normal WME save stack:
+// review with the HN layer, then save/undo in WME itself). Street-mismatch GIS
+// points in the corridor are listed report-only, never auto-added.
 
 /* global W, turf, GM_xmlhttpRequest, getWmeSdk */
 
@@ -27,11 +38,11 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.06.24.4';
+    const SCRIPT_VERSION = '2026.07.21.0';
     const LOG = '🔬 [RPP-GIS-Probe]';
+    const HN_LOG = '🔢 [HN-Filler]';
 
     // Sidebar-tab UI references (populated by setupProbeTab once WME is ready).
-    let probePaneRef = null;
     let probeStatusRef = null;
     let probeResultsRef = null;
     let probeButtonRef = null;
@@ -90,7 +101,9 @@
             bbox: [-105.33, 39.12, -104.55, 39.57], // Douglas County extent
             fields: (a) => ({
                 hn: a.ADDRESS_NUMBER,
-                street: joinStreet([a.STREET_PREDIRECTION_CODE, a.STREET_NAME, a.STREET_TYPE_CODE, a.STREET_POSTDIRECTION_CODE]),
+                street: joinStreet([
+                    a.STREET_PREDIRECTION_CODE, a.STREET_NAME, a.STREET_TYPE_CODE, a.STREET_POSTDIRECTION_CODE,
+                ]),
                 address: a.STREET_NAME_FULL || '',
                 city: a.POSTAL_NAME || '',
                 zip: a.ZIP_CODE || '',
@@ -108,7 +121,11 @@
     }
 
     function sourceHost(src) {
-        try { return new URL(src.url).hostname; } catch { return src.url; }
+        try {
+            return new URL(src.url).hostname;
+        } catch {
+            return src.url;
+        }
     }
 
     // Configured local jurisdictions, for the tab's persistent "source" line.
@@ -123,6 +140,18 @@
         minZoom: 17,           // below this, RPP data isn't reliably loaded
         maxListedPoints: 8,    // cap per-RPP point list in the console
         goZoomLevel: 19,          // zoom used by the "Go" button (house-level review)
+    };
+
+    // 🔢 HN Filler tunables (separate from the probe's — different geometry problem:
+    // corridor along a street line, not a radius around a point).
+    const HN_CONFIG = {
+        corridorM: 55,          // GIS point must be within this of a SELECTED segment's line to count
+        sampleStepM: 80,        // spacing of GIS query samples along the segment
+        queryRadiusM: 75,       // per-sample GIS radius (covers half a step along + the corridor across)
+        maxSegmentsPerScan: 10, // selection cap per scan
+        maxAddsPerScan: 50,     // hard cap on Add clicks per scan (guardrail)
+        minZoom: 17,            // same rationale as the probe: model not reliably loaded below this
+        selectionPollMs: 300,   // WME fires no reachable selection event (Segment City Tool finding) → poll
     };
 
     // Street-type normalization so "Springnite Drive" (WME) matches "SPRINGNITE DR" (GIS).
@@ -443,7 +472,9 @@
         // composite. (A single WME view sits within one jurisdiction.) If the
         // chosen local source errors mid-scan, switch to statewide for the rest.
         const vb = getMapExtentBbox();
-        const center = vb ? [(vb[0] + vb[2]) / 2, (vb[1] + vb[3]) / 2] : [getRppInfo(rpps[0]).lon, getRppInfo(rpps[0]).lat];
+        const center = vb
+            ? [(vb[0] + vb[2]) / 2, (vb[1] + vb[3]) / 2]
+            : [getRppInfo(rpps[0]).lon, getRppInfo(rpps[0]).lat];
         const requestedLocal = pickLocalSource(center[0], center[1]);
         let activeSource = requestedLocal || STATEWIDE_SOURCE;
         let usedFallback = false;
@@ -648,6 +679,424 @@
         }
     }
 
+    // ════════════════════════════════════════════════════════════════════════
+    // 🔢 HN FILLER — select road segment(s), list GIS house numbers missing from
+    // the map, add them one reviewed click at a time (added 2026-07-21).
+    // ════════════════════════════════════════════════════════════════════════
+
+    // Sidebar-tab UI references (populated by setupHnTab once WME is ready).
+    let hnStatusRef = null;
+    let hnResultsRef = null;
+    let hnButtonRef = null;
+    let hnSelLineRef = null;
+    let hnAddAllRef = null;
+
+    let hnSelectionSummary = '';      // last rendered selection line (skip redundant DOM writes)
+    let hnAddsThisScan = 0;
+    const hnSessionAdded = new Set(); // "street|hn" keys added this session (fetch won't see unsaved adds)
+
+    // House-number strings compare as normalized text ("123 A" == "123a"; letters + ½ pass through).
+    function normHn(v) {
+        const s = String(v ?? '').trim().toUpperCase().replace(/\s+/g, ' ');
+        return s === '' ? null : s;
+    }
+
+    function hnKey(street, hn) {
+        return `${streetCore(street)}|${normHn(hn)}`;
+    }
+
+    function setHnStatus(html, color) {
+        if (hnStatusRef) {
+            hnStatusRef.innerHTML = html;
+            hnStatusRef.style.color = color || '#444';
+        }
+    }
+
+    function setHnScanning(on) {
+        if (hnButtonRef) {
+            hnButtonRef.disabled = on;
+            hnButtonRef.textContent = on ? '⏳ Scanning…' : '🔢 Scan selected segment(s)';
+            hnButtonRef.style.opacity = on ? '0.6' : '1';
+        }
+    }
+
+    // ---- selection poll (no reachable selection event on current WME) --------
+
+    function currentSegmentSelection() {
+        if (!wmeSdk) {
+            return null;
+        }
+        try {
+            const sel = wmeSdk.Editing.getSelection();
+            return (sel && sel.objectType === 'segment' && sel.ids.length) ? sel.ids.slice() : null;
+        } catch {
+            return null;
+        }
+    }
+
+    function refreshHnSelectionLine() {
+        if (!hnSelLineRef) {
+            return;
+        }
+        const ids = currentSegmentSelection();
+        let summary;
+        if (!wmeSdk) {
+            summary = '⚠️ WME SDK unavailable — the HN Filler cannot run.';
+        } else if (!ids) {
+            summary = 'Select a road segment on the map (multi-select OK).';
+        } else {
+            let street = '';
+            try {
+                const addr = wmeSdk.DataModel.Segments.getAddress({ segmentId: ids[0] });
+                street = addr?.street?.name || '';
+            } catch { /* unloaded street — leave blank */ }
+            summary = `Selected: <b>${ids.length}</b> segment(s)${street ? ` — <b>${street}</b>` : ''}`;
+        }
+        if (summary !== hnSelectionSummary) {
+            hnSelectionSummary = summary;
+            hnSelLineRef.innerHTML = summary;
+            if (hnButtonRef) {
+                hnButtonRef.disabled = !ids;
+            }
+        }
+    }
+
+    function startHnSelectionPoll() {
+        setInterval(refreshHnSelectionLine, HN_CONFIG.selectionPollMs);
+    }
+
+    // ---- GIS along-the-segment query -----------------------------------------
+
+    // Sample coordinates every sampleStepM along the line (both endpoints included).
+    function samplePointsAlong(line) {
+        const lenKm = turf.length(line, { units: 'kilometers' });
+        const stepKm = HN_CONFIG.sampleStepM / 1000;
+        const pts = [];
+        for (let d = 0; d < lenKm; d += stepKm) {
+            pts.push(turf.along(line, d, { units: 'kilometers' }).geometry.coordinates);
+        }
+        pts.push(turf.along(line, lenKm, { units: 'kilometers' }).geometry.coordinates);
+        return pts;
+    }
+
+    function metersToLine(lon, lat, line) {
+        return turf.pointToLineDistance(turf.point([lon, lat]), line, { units: 'kilometers' }) * 1000;
+    }
+
+    // Query the active source at every sample along every selected segment; merge +
+    // dedupe by (street, hn). Returns { error, points, source, usedFallback }.
+    async function queryGisAlongSegments(segInfos) {
+        const mid = samplePointsAlong(segInfos[0].line)[0];
+        const requestedLocal = pickLocalSource(mid[0], mid[1]);
+        let activeSource = requestedLocal || STATEWIDE_SOURCE;
+        let usedFallback = false;
+        const seen = new Map();   // key → point
+        for (const si of segInfos) {
+            for (const [lon, lat] of samplePointsAlong(si.line)) {
+                let { error, points } = await queryOneSource(activeSource, lon, lat, HN_CONFIG.queryRadiusM);
+                if (error && activeSource.id !== STATEWIDE_SOURCE.id) {
+                    console.warn(`${HN_LOG} ${activeSource.name} failed (${error}) → statewide fallback for the rest of this scan.`);
+                    usedFallback = true;
+                    activeSource = STATEWIDE_SOURCE;
+                    ({ error, points } = await queryOneSource(activeSource, lon, lat, HN_CONFIG.queryRadiusM));
+                }
+                if (error) {
+                    return { error, points: [], source: activeSource, usedFallback };
+                }
+                for (const p of points) {
+                    if (p.lon == null || p.lat == null || normHn(p.hn) == null) {
+                        continue;
+                    }
+                    const key = hnKey(p.street, p.hn);
+                    if (!seen.has(key)) {
+                        seen.set(key, p);
+                    }
+                }
+            }
+        }
+        return { error: null, points: [...seen.values()], source: activeSource, usedFallback };
+    }
+
+    // ---- scan ----------------------------------------------------------------
+
+    // Loaded segments sharing a primary street with the selection — the HN
+    // dedupe universe AND the snap-target candidates (numbers near a segment end
+    // may belong on the neighboring same-street segment).
+    function sameStreetFamily(streetIds) {
+        const family = [];
+        const segObjs = (W && W.model && W.model.segments && W.model.segments.objects) ? W.model.segments.objects : {};
+        for (const sid in segObjs) {
+            const attrs = segObjs[sid].attributes || {};
+            const stId = attrs.primaryStreetID ?? attrs.primaryStreetId;
+            if (stId == null || !streetIds.has(stId)) {
+                continue;
+            }
+            const seg = wmeSdk.DataModel.Segments.getById({ segmentId: attrs.id });
+            if (seg && seg.geometry && seg.geometry.coordinates && seg.geometry.coordinates.length >= 2) {
+                family.push({ id: attrs.id, line: turf.lineString(seg.geometry.coordinates) });
+            }
+        }
+        return family;
+    }
+
+    async function hnScanSelected() {
+        hnAddsThisScan = 0;
+        if (!wmeSdk) {
+            setHnStatus('✗ WME SDK unavailable — cannot scan.', '#c00');
+            return;
+        }
+        const zoom = getZoom();
+        if (zoom != null && zoom < HN_CONFIG.minZoom) {
+            setHnStatus(`⚠️ Zoom in to level ${HN_CONFIG.minZoom}+ first (segment/HN data isn't reliably loaded at zoom ${zoom}).`, '#b26a00');
+            return;
+        }
+        const ids = currentSegmentSelection();
+        if (!ids) {
+            setHnStatus('Select a road segment first.', '#444');
+            return;
+        }
+        const capped = ids.length > HN_CONFIG.maxSegmentsPerScan;
+        const scanIds = ids.slice(0, HN_CONFIG.maxSegmentsPerScan);
+
+        setHnScanning(true);
+        if (hnResultsRef) {
+            hnResultsRef.innerHTML = '';
+        }
+
+        try {
+            // Per-segment info; skip segments whose street isn't resolvable (the RPP
+            // fixer's v4.5.2 lesson: never act on an unloaded street).
+            const segInfos = [];
+            const skipped = [];
+            for (const id of scanIds) {
+                const seg = wmeSdk.DataModel.Segments.getById({ segmentId: id });
+                let streetName = '';
+                try {
+                    streetName = wmeSdk.DataModel.Segments.getAddress({ segmentId: id })?.street?.name || '';
+                } catch { /* treated as unresolvable below */ }
+                if (!seg || !streetName) {
+                    skipped.push(id);
+                    continue;
+                }
+                segInfos.push({
+                    id,
+                    streetName,
+                    primaryStreetId: seg.primaryStreetId,
+                    line: turf.lineString(seg.geometry.coordinates),
+                });
+            }
+            if (!segInfos.length) {
+                setHnScanning(false);
+                setHnStatus('✗ No selected segment has a resolvable street (street not loaded?) — pan/zoom and retry.', '#c00');
+                return;
+            }
+
+            const streetIds = new Set(segInfos.map((s) => s.primaryStreetId).filter((x) => x != null));
+            const family = sameStreetFamily(streetIds);
+            const familyIds = new Set(family.map((f) => f.id));
+            setHnStatus(`⏳ Fetching existing house numbers for ${familyIds.size} same-street segment(s)…`, '#06c');
+
+            // Existing numbers = server state (fetch) + any unsaved local INSERTs
+            // (fetchHouseNumbers does NOT see unsaved adds — spike finding 2026-07-21).
+            const existing = await wmeSdk.DataModel.HouseNumbers.fetchHouseNumbers({ segmentIds: [...familyIds] });
+            const existingNums = new Set(existing.map((h) => normHn(h.number)).filter(Boolean));
+            const hnStore = (W && W.model && W.model.segmentHouseNumbers && W.model.segmentHouseNumbers.objects) || {};
+            for (const k in hnStore) {
+                const a = hnStore[k].attributes || hnStore[k];
+                const segRef = a.segID ?? a.segmentID;
+                if (familyIds.has(segRef)) {
+                    existingNums.add(normHn(a.number));
+                }
+            }
+
+            setHnStatus('⏳ Querying GIS address points along the selection…', '#06c');
+            const gis = await queryGisAlongSegments(segInfos);
+            if (gis.error) {
+                setHnScanning(false);
+                setHnStatus(`✗ GIS query failed: ${gis.error}`, '#c00');
+                return;
+            }
+
+            // Classify candidates within the corridor of the SELECTED segments.
+            const missing = [];
+            const mismatch = [];
+            let presentCount = 0;
+            for (const p of gis.points) {
+                const inCorridor = segInfos.some((si) => metersToLine(p.lon, p.lat, si.line) <= HN_CONFIG.corridorM);
+                if (!inCorridor) {
+                    continue;   // another block/parallel street — not this road's frontage
+                }
+                if (!segInfos.some((si) => streetsMatch(p.street, si.streetName))) {
+                    mismatch.push(p);
+                    continue;   // report-only: GIS says a different street fronts here
+                }
+                const norm = normHn(p.hn);
+                if (existingNums.has(norm) || hnSessionAdded.has(hnKey(p.street, p.hn))) {
+                    presentCount++;
+                    continue;
+                }
+                // Snap target: the closest same-street segment (numbers near a
+                // segment end can belong on the neighbor).
+                let best = null;
+                for (const f of family) {
+                    const d = metersToLine(p.lon, p.lat, f.line);
+                    if (!best || d < best.d) {
+                        best = { id: f.id, d };
+                    }
+                }
+                if (!best || best.d > HN_CONFIG.corridorM) {
+                    continue;
+                }
+                missing.push({
+                    hn: String(p.hn).trim(),
+                    street: p.street,
+                    address: p.address || `${p.hn} ${p.street}`,
+                    lon: p.lon,
+                    lat: p.lat,
+                    attachSegId: best.id,
+                    attachDistM: best.d,
+                });
+            }
+            missing.sort((a, b) => (parseInt(a.hn, 10) || 0) - (parseInt(b.hn, 10) || 0));
+
+            renderHnResults(missing, mismatch);
+            setHnScanning(false);
+            const at = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            const streets = [...new Set(segInfos.map((s) => s.streetName))].join(', ');
+            const srcDesc = gis.usedFallback
+                ? `${STATEWIDE_SOURCE.name} — fallback · ${sourceHost(STATEWIDE_SOURCE)}`
+                : `${gis.source.name}${gis.source.id === STATEWIDE_SOURCE.id ? '' : ' (local)'} · ${sourceHost(gis.source)}`;
+            const notes = [
+                capped ? `first ${HN_CONFIG.maxSegmentsPerScan} of ${ids.length} selected segments` : '',
+                skipped.length ? `${skipped.length} segment(s) skipped (street not loaded)` : '',
+            ].filter(Boolean).join(' · ');
+            const tallyLine = `${presentCount} already mapped · <b>${missing.length} missing</b> · ${mismatch.length} street-mismatch`
+                + `<br><span style="color:#235;">🗺️ ${srcDesc}</span>${notes ? `<br><span style="color:#888;">${notes}</span>` : ''}`;
+            if (missing.length === 0) {
+                setHnStatus(`✅ Done ${at} — <b>${streets}</b>: every GIS house number in the corridor is already mapped.<br>${tallyLine}`, '#0a7');
+            } else {
+                setHnStatus(`⚠️ Done ${at} — <b>${streets}</b>: ${missing.length} house number(s) missing. Review below.<br>${tallyLine}`, '#b26a00');
+            }
+            console.log(`%c${HN_LOG} ${streets}: GIS on-street=${presentCount + missing.length} present=${presentCount} missing=${missing.length} mismatch=${mismatch.length} via ${srcDesc}`, 'color:#06c;font-weight:bold');
+        } catch (e) {
+            setHnScanning(false);
+            setHnStatus(`✗ Scan failed: ${e.message}`, '#c00');
+            console.error(`${HN_LOG} scan failed:`, e);
+        }
+    }
+
+    // ---- add (the map-writing action — reviewed, one at a time) --------------
+
+    function hnAddOne(c) {
+        if (!wmeSdk) {
+            return { ok: false, err: 'SDK unavailable' };
+        }
+        if (hnAddsThisScan >= HN_CONFIG.maxAddsPerScan) {
+            return { ok: false, err: `per-scan cap (${HN_CONFIG.maxAddsPerScan}) reached — rescan to continue` };
+        }
+        if (!wmeSdk.DataModel.Segments.getById({ segmentId: c.attachSegId })) {
+            return { ok: false, err: 'target segment no longer loaded — rescan' };
+        }
+        const before = wmeSdk.Editing.getUnsavedChangesCount();
+        try {
+            wmeSdk.DataModel.HouseNumbers.addHouseNumber({
+                number: c.hn,
+                point: { type: 'Point', coordinates: [c.lon, c.lat] },
+                segmentId: c.attachSegId,
+            });
+        } catch (e) {
+            return { ok: false, err: `${e.name || 'error'}: ${e.message}` };
+        }
+        if (wmeSdk.Editing.getUnsavedChangesCount() <= before) {
+            return { ok: false, err: 'no edit registered — check the console' };
+        }
+        hnAddsThisScan++;
+        hnSessionAdded.add(hnKey(c.street, c.hn));
+        console.log(`${HN_LOG} added HN ${c.hn} (${c.street}) @ (${c.lon.toFixed(6)}, ${c.lat.toFixed(6)}) → segment ${c.attachSegId} [${c.attachDistM.toFixed(0)}m] — UNSAVED until you save in WME.`);
+        return { ok: true };
+    }
+
+    function makeHnMissingRow(c) {
+        const { row, span } = makeRow(`${c.hn} — ${c.street} (→ seg ${c.attachSegId}, ${c.attachDistM.toFixed(0)}m)`);
+        const btn = document.createElement('button');
+        btn.textContent = 'Add';
+        btn.title = 'Create this house number at the GIS point, snapped to the segment shown (unsaved until you save in WME)';
+        btn.style.cssText = 'padding:3px 8px;background:#0a7;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:11px;';
+        btn.addEventListener('click', () => {
+            const res = hnAddOne(c);
+            if (res.ok) {
+                span.textContent = `✓ added — ${c.hn} ${c.street}`;
+                span.style.color = '#0a0';
+                btn.remove();
+            } else {
+                span.textContent = `✗ ${c.hn}: ${res.err}`;
+                span.style.color = '#c00';
+            }
+        });
+        row.appendChild(makeGoButton(c.lon, c.lat));
+        row.appendChild(btn);
+        return row;
+    }
+
+    function renderHnResults(missing, mismatch) {
+        if (!hnResultsRef) {
+            return;
+        }
+        hnResultsRef.innerHTML = '';
+        if (hnAddAllRef) {
+            hnAddAllRef.style.display = missing.length ? 'inline-block' : 'none';
+        }
+        if (missing.length) {
+            hnResultsRef.appendChild(makeSectionHeader('MISSING — in GIS, not on the map:'));
+            missing.forEach((c) => hnResultsRef.appendChild(makeHnMissingRow(c)));
+        }
+        if (mismatch.length) {
+            hnResultsRef.appendChild(makeSectionHeader('STREET MISMATCH — GIS says another street fronts here (report-only):'));
+            mismatch.forEach((p) => {
+                const { row } = makeRow(`${p.hn} ${p.street} — ${p.address || ''}`);
+                row.appendChild(makeGoButton(p.lon, p.lat));
+                hnResultsRef.appendChild(row);
+            });
+        }
+    }
+
+    function setupHnTab() {
+        let reg;
+        try {
+            reg = W.userscripts.registerSidebarTab('hn-filler');
+        } catch (e) {
+            console.warn(`${HN_LOG} sidebar tab unavailable:`, e.message);
+            return;
+        }
+        const { tabLabel, tabPane } = reg;
+        tabLabel.innerText = '🔢 HN';
+        tabLabel.title = 'HN Filler — add house numbers missing from the map, from authoritative GIS address points';
+        tabPane.innerHTML = `
+            <div style="font-family:sans-serif;font-size:12px;">
+              <h2 style="font-size:14px;margin:6px 0;">🔢 HN Filler <span style="font-weight:normal;color:#888;font-size:10px;">v${SCRIPT_VERSION}</span></h2>
+              <p style="color:#555;margin:4px 0 8px;">Select road segment(s), scan, review the house numbers GIS has but the map is missing, add each with one click. Adds are <b>unsaved</b> until you save in WME — review with the House Numbers layer on.</p>
+              <div id="hn-filler-selline" style="margin:4px 0 8px;padding:5px 8px;background:#f3f6ff;border-left:3px solid #06c;border-radius:3px;font-size:11px;color:#235;">Select a road segment on the map (multi-select OK).</div>
+              <button id="hn-filler-scan" disabled style="padding:7px 12px;background:#06c;color:#fff;border:none;border-radius:5px;font-size:13px;font-weight:bold;cursor:pointer;">🔢 Scan selected segment(s)</button>
+              <button id="hn-filler-addall" disabled title="Disabled until the per-row Add flow has proven itself in real use." style="display:none;margin-left:6px;padding:7px 12px;background:#aaa;color:#fff;border:none;border-radius:5px;font-size:13px;cursor:not-allowed;">Add all</button>
+              <div id="hn-filler-status" style="margin:8px 0;padding:6px 8px;background:#f3f3f3;border-radius:4px;font-size:11px;color:#444;">Idle — select a segment and click <b>Scan</b>.</div>
+              <div id="hn-filler-results"></div>
+            </div>`;
+        hnSelLineRef = tabPane.querySelector('#hn-filler-selline');
+        hnStatusRef = tabPane.querySelector('#hn-filler-status');
+        hnResultsRef = tabPane.querySelector('#hn-filler-results');
+        hnButtonRef = tabPane.querySelector('#hn-filler-scan');
+        hnAddAllRef = tabPane.querySelector('#hn-filler-addall');
+        hnButtonRef.addEventListener('click', () => {
+            hnScanSelected().catch((e) => {
+                setHnScanning(false);
+                setHnStatus(`✗ Scan failed: ${e.message}`, '#c00');
+                console.error(`${HN_LOG} scan failed:`, e);
+            });
+        });
+        startHnSelectionPoll();
+        console.log(`%c${HN_LOG} ready — "🔢 HN" tab added. Scan is read-only; each "Add" is a reviewed unsaved edit.`, 'color:#06c;font-weight:bold');
+    }
+
     // ---- bootstrap ------------------------------------------------------------
 
     function setupProbeTab() {
@@ -671,7 +1120,6 @@
               <div id="rpp-gis-probe-status" style="margin:8px 0;padding:6px 8px;background:#f3f3f3;border-radius:4px;font-size:11px;color:#444;">Idle — click <b>Probe</b> to scan the RPPs currently in view.</div>
               <div id="rpp-gis-probe-results"></div>
             </div>`;
-        probePaneRef = tabPane;
         probeStatusRef = tabPane.querySelector('#rpp-gis-probe-status');
         probeResultsRef = tabPane.querySelector('#rpp-gis-probe-results');
         probeButtonRef = tabPane.querySelector('#rpp-gis-probe-run');
@@ -740,6 +1188,7 @@
 
     function onReady() {
         setupProbeTab();
+        setupHnTab();
     }
 
     // Bind the WME SDK if it's available — OPTIONAL. We mostly use legacy reads
@@ -765,6 +1214,7 @@
 
     // Expose for manual console use.
     window.rppGisProbe = () => probeVisibleRPPs().catch((e) => console.error(`${LOG} probe failed:`, e));
+    window.hnFillerScan = () => hnScanSelected().catch((e) => console.error(`${HN_LOG} scan failed:`, e));
 
     // Entry point — mirror the RPP fixer: run when WME signals ready (not on a
     // poll of window.SDK_INITIALIZED, which Tampermonkey's sandbox never exposes).
