@@ -8,7 +8,7 @@ const path = require('path');
 
 const src = fs.readFileSync(path.join(__dirname, 'wme-rpp-gis-probe.user.js'), 'utf8');
 const grab = (from, to) => src.slice(src.indexOf(from), src.indexOf(to));
-eval(grab('const STREET_TYPES', 'let wmeSdk') + grab('function normalizeStreet', '// ---- GIS query'));
+eval(grab('const STREET_TYPES', 'let wmeSdk') + grab('// ---- street matching', '// ---- GIS query'));
 
 const cases = [
     // [WME side, GIS side, expected] — field bugs (all 2026-07-21):
@@ -33,11 +33,28 @@ const cases = [
     ['Spring Creek Dr', 'SPG CRK DR', true],         // mid-name tokens canonicalize both sides
     ['Loblolly Pine', 'LOBLOLLY PINE WY', true],     // WME side missing the type
     ['Big Johnson Dr', 'BIG JOHNSON', true],         // GIS side missing the type
+    // Numbered routes (WME CO conventions vs GIS spellings, 2026-07-21):
+    ['CR-123', 'COUNTY ROAD 123', true],
+    ['CR-123', 'COUNTY RD 123', true],
+    ['CR-7', 'COUNTY ROAD 007', true],               // leading zeros
+    ['SH-23', 'CO-23', true],
+    ['SH-134', 'COLORADO 134', true],
+    ['SH-105', 'HIGHWAY 105', true],
+    ['SH-83', 'STATE HIGHWAY 83', true],
+    ['WCR-45', 'COUNTY ROAD 45', true],              // Weld: WCR folds into CR
+    ['WCR-45', 'WELD COUNTY ROAD 45', true],
+    ['US-85', 'US HIGHWAY 85', true],
+    ['I-25', 'INTERSTATE 25', true],
+    ['CR-59A', 'COUNTY ROAD 59A', true],             // letter-suffixed route number
+    ['Smith-Jones Rd', 'SMITH JONES RD', true],      // hyphen = space in real names too
+    ['Highway View Dr', 'HIGHWAY VIEW DR', true],    // route words inside a real name: untouched
     // Must REFUSE:
     ['E Woodmen Rd', 'WOODMEN RD', false],           // missing directional = real flag (intentional gap)
     ['Estes St', 'ESTES PARK', false],
     ['Sage Brush Way', 'SAGE BRUSH TRL', false],     // conflicting types = different streets
     ['Sunset View', 'SUNSET WAY', false],
+    ['CR-123', 'COUNTY ROAD 124', false],            // different route numbers
+    ['SH-23', 'US-23', false],                       // different route systems
 ];
 
 let failures = 0;

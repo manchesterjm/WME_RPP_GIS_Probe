@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.21.5';
+    const SCRIPT_VERSION = '2026.07.21.6';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -296,11 +296,46 @@
 
     // ---- street matching ------------------------------------------------------
 
+    // Numbered-route canonicalization (2026-07-21): WME Colorado conventions are
+    // CR-123 (county road), SH-23 (state highway — GIS says CO-23 / COLORADO 23 /
+    // STATE HIGHWAY 23), WCR-45 (Weld's county roads — same road GIS calls plain
+    // COUNTY ROAD 45, so WCR folds into CR; corridor geometry keeps counties
+    // apart), US-85, I-25. Patterns are anchored prefix+number, so real names
+    // that merely contain these words ("Highway View Dr") never match. Leading
+    // zeros in the number are dropped ("COUNTY ROAD 007" = CR-7).
+    // Known gap: directional-prefixed county roads ("E County Road 30") pass
+    // through unrouted.  Order matters: CR forms (incl. "CO RD") before the SH
+    // catch-all that claims bare CO/HWY.
+    const ROUTE_FORMS = [
+        [/^(?:WELD COUNTY (?:ROAD|RD)|WELD CR|WCR) 0*(\d+[A-Z]?)$/, 'CR'],
+        [/^(?:COUNTY (?:ROAD|RD)|CNTY RD|CO RD|CR) 0*(\d+[A-Z]?)$/, 'CR'],
+        [/^(?:US (?:HIGHWAY|HWY|ROUTE)|U S HIGHWAY|US) 0*(\d+[A-Z]?)$/, 'US'],
+        [/^(?:INTERSTATE|IH|I) 0*(\d+[A-Z]?)$/, 'I'],
+        [/^(?:STATE (?:HIGHWAY|HWY|ROUTE)|ST HWY|SR|SH|COLORADO|COLO|CO|HIGHWAY|HWY) 0*(\d+[A-Z]?)$/, 'SH'],
+    ];
+
+    function canonicalizeRoute(cleaned) {
+        for (const [re, prefix] of ROUTE_FORMS) {
+            const m = cleaned.match(re);
+            if (m) {
+                return `${prefix} ${m[1]}`;
+            }
+        }
+        return null;
+    }
+
     function normalizeStreet(name) {
         if (!name) {
             return '';
         }
-        const cleaned = String(name).toUpperCase().replace(/\./g, '').replace(/\s+/g, ' ').trim();
+        // Hyphens count as spaces ("CR-123", "Smith-Jones Rd") — both sides get
+        // the same treatment, and the space-squash fallback covers merged forms.
+        const cleaned = String(name).toUpperCase()
+            .replace(/\./g, '').replace(/-/g, ' ').replace(/\s+/g, ' ').trim();
+        const route = canonicalizeRoute(cleaned);
+        if (route) {
+            return route;
+        }
         return cleaned.split(' ').map((tok) => STREET_TYPES[tok] || tok).join(' ');
     }
 
