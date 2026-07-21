@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.21.20';
+    const SCRIPT_VERSION = '2026.07.21.21';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -370,7 +370,13 @@
 
     // Tunables (Josh can dial these as we learn what the data looks like).
     const CONFIG = {
-        queryRadiusM: 60,      // how far around an RPP to pull authoritative points
+        // 60 was a suburban assumption — rural CO puts houses (and misplaced
+        // pins) hundreds of meters from their GIS point, and a pin whose OWN
+        // point isn't fetched can never be flagged `misplaced` (it dies as a
+        // row-less no-match). Raised 60 → 500 for the 2026-07-21 Mesa County
+        // case; the nearest-point rule is distance-ranked, so a bigger radius
+        // doesn't loosen verdicts.
+        queryRadiusM: 500,     // how far around an RPP to pull authoritative points
         wellPlacedM: 12,       // fast-path: matched point this close → definitely on the right lot, skip the neighbor check
         misplacedMarginM: 8,   // a DIFFERENT address must be at least this much closer than the RPP's own point to call it misplaced (robust to rooftop-vs-frontyard offset; tune up = more conservative)
         wrongHnCloseM: 8,      // a *different*-HN point this close suggests the RPP's HN is wrong
@@ -865,6 +871,8 @@
 
         const tally = {};
         const misplaced = [];   // → result rows with a Snap button
+        const review = [];      // wrong-hn / hn-diff-street / no-match — report-only rows (v.21:
+                                //   these were console-only; a found problem showed an empty tab)
         for (let idx = 0; idx < rpps.length; idx++) {
             const rpp = rpps[idx];
             setProbeStatus(`⏳ Scanning ${idx + 1}/${rpps.length} via ${sourceHost(activeSource)}…`, '#06c');
@@ -904,6 +912,14 @@
                     rppLon: info.lon,             // RPP's current location — where Go pans to
                     rppLat: info.lat,
                 });
+            } else if (verdict.code === 'wrong-hn' || verdict.code === 'hn-diff-street' || verdict.code === 'no-match') {
+                review.push({
+                    code: verdict.code,
+                    hn: rppHn ?? '∅',
+                    street: info.street || '∅',
+                    rppLon: info.lon,
+                    rppLat: info.lat,
+                });
             }
 
             console.groupEnd();
@@ -913,7 +929,7 @@
         console.log(`%c${LOG} SUMMARY — ${rpps.length} RPP(s): ${summary}`, 'color:#06c;font-weight:bold');
 
         setProbeScanning(false);
-        renderProbeResults(misplaced);
+        renderProbeResults(misplaced, review);
         const at = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
         // Describe the source actually used: local, local-with-fallback, or
@@ -1053,10 +1069,18 @@
 
     // Render results into the sidebar tab if it's present; otherwise fall back to
     // a floating panel (only happens if registerSidebarTab was unavailable).
-    function renderProbeResults(misplaced) {
+    function renderProbeResults(misplaced, review) {
         if (probeResultsRef) {
             clearProbeResults();
             appendResultSections(probeResultsRef, misplaced);
+            if (review && review.length) {
+                probeResultsRef.appendChild(makeSectionHeader('REVIEW — other verdicts (console has per-point detail):'));
+                review.forEach((r) => {
+                    const { row } = makeRow(`[${r.code}] ${r.hn} — ${r.street}`);
+                    row.appendChild(makeGoButton(r.rppLon, r.rppLat));
+                    probeResultsRef.appendChild(row);
+                });
+            }
         } else {
             refreshSnapPanel(misplaced);
         }
