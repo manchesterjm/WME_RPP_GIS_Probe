@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.21.9';
+    const SCRIPT_VERSION = '2026.07.21.10';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -78,9 +78,16 @@
     const LOCAL_SOURCES = [
         {
             id: 'cosp',
-            name: 'City of Colorado Springs',
+            name: 'El Paso County (COSP GIS)',
             url: 'https://gis.coloradosprings.gov/arcgis/rest/services/GeneralUse/LandRecords/MapServer/0/query',
-            bbox: [-104.93, 38.74, -104.62, 39.07], // COSP metro (approx); edges fall back to statewide on empty
+            // ⚠️ 2026-07-21: this "city" service is actually EL PASO COUNTY-WIDE —
+            // verified at Peyton (House Rock Dr: 44 points incl. the POST-replat
+            // street names; the statewide composite only had the pre-replat
+            // ARRIBA/NEDERLAND generation there). Old city-metro bbox was clipping
+            // it to COSP and pushing county areas onto the stale statewide source.
+            // bbox ≈ El Paso County; north edge 39.129 = the Douglas county line
+            // (listed FIRST, so the boundary band resolves to El Paso, correctly).
+            bbox: [-105.26, 38.52, -104.05, 39.129],
             fields: (a) => ({
                 hn: a.Add_Number,
                 street: a.FullStreet || '',
