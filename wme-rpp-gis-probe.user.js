@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.21.6';
+    const SCRIPT_VERSION = '2026.07.21.7';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -780,6 +780,7 @@
     let hnSelectionSummary = '';      // last rendered selection line (skip redundant DOM writes)
     let hnAddsThisScan = 0;
     const hnSessionAdded = new Set(); // "street|hn" keys added this session (fetch won't see unsaved adds)
+    let hnPendingRows = [];           // current scan's missing rows — {c, span, btn, done}; Add-all walks this
 
     // User-adjustable search distance (corridor from the road centerline).
     const HN_CORRIDOR_STORE = 'hnFiller.corridorM';
@@ -1148,26 +1149,69 @@
         return { ok: true };
     }
 
+    // One reviewed add applied to a result row — shared by the row's own Add
+    // button and the Add-all walk, so both paths look and behave identically.
+    function applyAddToRow(entry) {
+        if (entry.done) {
+            return { ok: true };
+        }
+        const res = hnAddOne(entry.c);
+        if (res.ok) {
+            entry.done = true;
+            entry.span.textContent = `✓ added — ${entry.c.hn} ${entry.c.street}`;
+            entry.span.style.color = '#0a0';
+            entry.btn.remove();
+        } else {
+            entry.span.textContent = `✗ ${entry.c.hn}: ${res.err}`;
+            entry.span.style.color = '#c00';
+        }
+        return res;
+    }
+
     function makeHnMissingRow(c) {
         const { row, span } = makeRow(`${c.hn} — ${c.street} (→ seg ${c.attachSegId}, ${c.attachDistM.toFixed(0)}m)`);
         const btn = document.createElement('button');
         btn.textContent = 'Add';
         btn.title = 'Create this house number at the GIS point, snapped to the segment shown (unsaved until you save in WME)';
         btn.style.cssText = 'padding:3px 8px;background:#0a7;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:11px;';
+        const entry = { c, span, btn, done: false };
+        hnPendingRows.push(entry);
         btn.addEventListener('click', () => {
-            const res = hnAddOne(c);
-            if (res.ok) {
-                span.textContent = `✓ added — ${c.hn} ${c.street}`;
-                span.style.color = '#0a0';
-                btn.remove();
-            } else {
-                span.textContent = `✗ ${c.hn}: ${res.err}`;
-                span.style.color = '#c00';
-            }
+            applyAddToRow(entry);
         });
         row.appendChild(makeGoButton(c.lon, c.lat));
         row.appendChild(btn);
         return row;
+    }
+
+    // Add-all (enabled 2026-07-21 after the per-row flow proved out in the
+    // field): walks the current scan's rows through the SAME reviewed-add path.
+    // Everything stays unsaved until Josh saves in WME — the bulk is still
+    // reviewable there, and the per-scan cap applies.
+    function hnAddAll() {
+        let added = 0;
+        let failed = 0;
+        for (const entry of hnPendingRows) {
+            if (entry.done) {
+                continue;
+            }
+            const res = applyAddToRow(entry);
+            if (res.ok) {
+                added++;
+            } else {
+                failed++;
+                if (/per-scan cap/.test(res.err || '')) {
+                    break;
+                }
+            }
+        }
+        const remaining = hnPendingRows.filter((e) => !e.done).length;
+        setHnStatus(`Add-all: <b>${added} added</b>${failed ? ` · ${failed} failed` : ''}`
+            + `${remaining ? ` · ${remaining} still pending` : ''} — all UNSAVED until you save in WME.`,
+        failed ? '#b26a00' : '#0a7');
+        if (hnAddAllRef) {
+            hnAddAllRef.style.display = remaining ? 'inline-block' : 'none';
+        }
     }
 
     function renderHnResults(missing, mismatch) {
@@ -1175,8 +1219,10 @@
             return;
         }
         hnResultsRef.innerHTML = '';
+        hnPendingRows = [];
         if (hnAddAllRef) {
             hnAddAllRef.style.display = missing.length ? 'inline-block' : 'none';
+            hnAddAllRef.textContent = `Add all (${missing.length})`;
         }
         if (missing.length) {
             hnResultsRef.appendChild(makeSectionHeader('MISSING — in GIS, not on the map:'));
@@ -1214,7 +1260,7 @@
                 m from the road <span style="color:#888;">(default ${HN_CONFIG.corridorM})</span>
               </div>
               <button id="hn-filler-scan" disabled style="padding:7px 12px;background:#06c;color:#fff;border:none;border-radius:5px;font-size:13px;font-weight:bold;cursor:pointer;">🔢 Scan selected segment(s)</button>
-              <button id="hn-filler-addall" disabled title="Disabled until the per-row Add flow has proven itself in real use." style="display:none;margin-left:6px;padding:7px 12px;background:#aaa;color:#fff;border:none;border-radius:5px;font-size:13px;cursor:not-allowed;">Add all</button>
+              <button id="hn-filler-addall" title="Add every listed missing house number (same reviewed path as the row buttons; all unsaved until you save in WME)" style="display:none;margin-left:6px;padding:7px 12px;background:#0a7;color:#fff;border:none;border-radius:5px;font-size:13px;font-weight:bold;cursor:pointer;">Add all</button>
               <div id="hn-filler-status" style="margin:8px 0;padding:6px 8px;background:#f3f3f3;border-radius:4px;font-size:11px;color:#444;">Idle — select a segment and click <b>Scan</b>.</div>
               <div id="hn-filler-results"></div>
             </div>`;
@@ -1223,6 +1269,7 @@
         hnResultsRef = tabPane.querySelector('#hn-filler-results');
         hnButtonRef = tabPane.querySelector('#hn-filler-scan');
         hnAddAllRef = tabPane.querySelector('#hn-filler-addall');
+        hnAddAllRef.addEventListener('click', hnAddAll);
         const corridorInput = tabPane.querySelector('#hn-filler-corridor');
         corridorInput.value = hnCorridorM();
         corridorInput.addEventListener('change', () => {
