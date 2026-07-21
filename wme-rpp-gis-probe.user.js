@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.21.2';
+    const SCRIPT_VERSION = '2026.07.21.3';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -303,13 +303,6 @@
 
     const TYPE_ABBREVS = new Set(Object.values(STREET_TYPES));
 
-    // The trailing street-type token (canonical), or null if the name ends bare.
-    function trailingType(name) {
-        const tokens = normalizeStreet(name).split(' ');
-        return (tokens.length > 1 && TYPE_ABBREVS.has(tokens[tokens.length - 1]))
-            ? tokens[tokens.length - 1] : null;
-    }
-
     function streetCore(name) {
         const tokens = normalizeStreet(name).split(' ');
         if (tokens.length > 1 && TYPE_ABBREVS.has(tokens[tokens.length - 1])) {
@@ -318,20 +311,18 @@
         return tokens.join(' ');
     }
 
-    // Exact normalized match, OR core-name match — but a MISSING type is benign
-    // (GIS sources sometimes omit it) while two CONFLICTING types mean different
-    // streets ("Sage Brush Way" ≠ "Sage Brush Trl"; tightened 2026-07-21, the old
-    // unconditional core fallback equated those).
+    // Exact normalized match, OR one side minus its trailing type equals the OTHER
+    // SIDE IN FULL. Stripping from one side at a time is the key (v2026.07.21.3):
+    // it accepts a source that omits the type ("Big Johnson Dr" vs "BIG JOHNSON")
+    // AND names whose last word merely LOOKS like a type — "Sunset View Way" vs
+    // GIS "SUNSET VIEW" matches (strip WAY → SUNSET VW = the GIS name in full),
+    // while "Sage Brush Way" vs "SAGE BRUSH TRL" still refuses (stripping either
+    // side never yields the other side whole). The old both-sides core compare
+    // failed the first and matched the second — both wrong.
     function streetsMatch(a, b) {
-        if (normalizeStreet(a) === normalizeStreet(b)) {
-            return true;
-        }
-        const ta = trailingType(a);
-        const tb = trailingType(b);
-        if (ta && tb && ta !== tb) {
-            return false;
-        }
-        return streetCore(a) === streetCore(b);
+        const na = normalizeStreet(a);
+        const nb = normalizeStreet(b);
+        return na === nb || streetCore(a) === nb || streetCore(b) === na;
     }
 
     // ---- GIS query ------------------------------------------------------------
