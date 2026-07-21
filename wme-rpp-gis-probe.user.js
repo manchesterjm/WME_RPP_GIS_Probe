@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.21.24';
+    const SCRIPT_VERSION = '2026.07.21.25';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -382,8 +382,8 @@
         // because the next house is farther still. A correctly placed pin sits
         // at/near the structure whatever the driveway length, so beyond this
         // the pin is misplaced even with no closer neighbor. (100 → 50 same
-        // day: the field pin sat ~90-105m out, right at the old cap's edge.)
-        farOwnM: 50,
+        // day: field pin ~90-105m out sat at the 100 cap edge; Josh set 30 — the
+        farOwnM: 30,
         wellPlacedM: 12,       // fast-path: matched point this close → definitely on the right lot, skip the neighbor check
         misplacedMarginM: 8,   // a DIFFERENT address must be at least this much closer than the RPP's own point to call it misplaced (robust to rooftop-vs-frontyard offset; tune up = more conservative)
         wrongHnCloseM: 8,      // a *different*-HN point this close suggests the RPP's HN is wrong
