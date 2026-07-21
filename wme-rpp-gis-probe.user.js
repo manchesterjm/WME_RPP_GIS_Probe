@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.21.27';
+    const SCRIPT_VERSION = '2026.07.21.28';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -589,6 +589,52 @@
         return { sys: m[1], nums };
     }
 
+    // Ordinal street names (2026-07-21): GIS spells them out (FIRST, SECOND,
+    // TWENTY FIRST) while road signs — and therefore WME — use 1st/2nd/21st.
+    // Everything canonicalizes to the digit form; compounds are merged from
+    // their two tokens (hyphens already became spaces upstream).
+    const ORDINAL_WORDS = {
+        FIRST: '1ST', SECOND: '2ND', THIRD: '3RD', FOURTH: '4TH', FIFTH: '5TH',
+        SIXTH: '6TH', SEVENTH: '7TH', EIGHTH: '8TH', NINTH: '9TH', TENTH: '10TH',
+        ELEVENTH: '11TH', TWELFTH: '12TH', THIRTEENTH: '13TH', FOURTEENTH: '14TH',
+        FIFTEENTH: '15TH', SIXTEENTH: '16TH', SEVENTEENTH: '17TH', EIGHTEENTH: '18TH',
+        NINETEENTH: '19TH', TWENTIETH: '20TH', THIRTIETH: '30TH', FORTIETH: '40TH',
+        FIFTIETH: '50TH', SIXTIETH: '60TH', SEVENTIETH: '70TH', EIGHTIETH: '80TH',
+        NINETIETH: '90TH',
+    };
+    const ORDINAL_TENS = {
+        TWENTY: 20, THIRTY: 30, FORTY: 40, FIFTY: 50, SIXTY: 60, SEVENTY: 70, EIGHTY: 80, NINETY: 90,
+    };
+    const ORDINAL_UNITS = {
+        FIRST: 1, SECOND: 2, THIRD: 3, FOURTH: 4, FIFTH: 5, SIXTH: 6, SEVENTH: 7, EIGHTH: 8, NINTH: 9,
+    };
+
+    function ordinalSuffix(unit) {
+        if (unit === 1) {
+            return 'ST';
+        }
+        if (unit === 2) {
+            return 'ND';
+        }
+        return unit === 3 ? 'RD' : 'TH';
+    }
+
+    // "TWENTY FIRST" → "21ST", "FOURTH" → "4TH"; non-ordinal tokens pass through.
+    function canonicalizeOrdinals(tokens) {
+        const out = [];
+        for (let i = 0; i < tokens.length; i++) {
+            const tens = ORDINAL_TENS[tokens[i]];
+            const unit = i + 1 < tokens.length ? ORDINAL_UNITS[tokens[i + 1]] : undefined;
+            if (tens && unit) {
+                out.push(`${tens + unit}${ordinalSuffix(unit)}`);
+                i++;
+                continue;
+            }
+            out.push(ORDINAL_WORDS[tokens[i]] || tokens[i]);
+        }
+        return out;
+    }
+
     // Cardinal directionals (2026-07-21): TRANSLATE spelled-out forms at the
     // name's ends (EAST WOODMEN → E WOODMEN — positional, so a mid-name "North"
     // is never touched), then in streetsMatch: a directional present on ONE side
@@ -612,7 +658,7 @@
         if (route) {
             return route;
         }
-        const tokens = cleaned.split(' ');
+        const tokens = canonicalizeOrdinals(cleaned.split(' '));
         if (tokens.length > 1 && DIR_CANON[tokens[0]]) {
             tokens[0] = DIR_CANON[tokens[0]];
         }

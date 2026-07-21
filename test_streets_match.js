@@ -70,6 +70,16 @@ const cases = [
     ['North Pines Trl', 'PINES TRL', true],          // one-sided ignore (accepted looseness, corridor limits damage)
     ['N Academy Blvd', 'ACADEMY BLVD N', true],      // same dir, position-blind
     ['S Union Blvd', 'UNION BOULEVARD SOUTH', true],
+    // Ordinal names (2026-07-21): GIS spells out, signs/WME use digits:
+    ['1st St', 'FIRST ST', true],
+    ['2nd Ave', 'SECOND AVENUE', true],
+    ['3rd Pl', 'THIRD PLACE', true],
+    ['4th St', 'FOURTH', true],                      // GIS bare, one-sided type strip composes
+    ['21st Ave', 'TWENTY FIRST AVE', true],
+    ['21st Ave', 'TWENTY-FIRST AVENUE', true],
+    ['30th St', 'THIRTIETH ST', true],
+    ['E 12th St', 'TWELFTH ST', true],               // ordinal + one-sided directional
+    ['1st St', 'SECOND ST', false],
     // Must REFUSE:
     ['E Woodmen Rd', 'W WOODMEN RD', false],         // conflicting directionals = different streets
     ['NE Circle Dr', 'SW CIRCLE DR', false],
