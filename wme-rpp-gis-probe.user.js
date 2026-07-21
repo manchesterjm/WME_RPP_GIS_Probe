@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.21.14';
+    const SCRIPT_VERSION = '2026.07.21.15';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -1274,19 +1274,37 @@
         return plrs;
     }
 
-    // Existing RPP house numbers on the selection's streets — venues, not
-    // segment HNs, so fetchHouseNumbers never sees them (PLR-workflow areas
-    // use RPPs as the norm; without this they'd re-propose forever).
-    function existingRppNumbers(streetIds) {
+    // Existing RPP house numbers covering the selection — venues, not segment
+    // HNs, so fetchHouseNumbers never sees them; and an RPP takes PRECEDENCE
+    // over a segment HN for search/navigation (Josh 2026-07-21), so a covered
+    // address must never be proposed. Matched by street NAME via streetsMatch
+    // (v.15 — street-object ids miss city-variant duplicates like the
+    // "No city"/"Parker" pair on one road), with a geometric fallback: an RPP
+    // with an unresolvable street still covers if it sits in the corridor.
+    function existingRppNumbers(segInfos, corridor) {
         const nums = new Set();
         const venueObjs = (W && W.model && W.model.venues && W.model.venues.objects) ? W.model.venues.objects : {};
         for (const vid in venueObjs) {
-            const attrs = venueObjs[vid].attributes || {};
-            if (!attrs.categories || !attrs.categories.includes('RESIDENCE_HOME')) {
+            const venue = W.model.venues.getObjectById(vid);
+            const attrs = venue && venue.attributes;
+            if (!attrs || !attrs.categories || !attrs.categories.includes('RESIDENCE_HOME')) {
                 continue;
             }
-            if (streetIds.has(attrs.streetID) && attrs.houseNumber != null) {
-                nums.add(normHn(attrs.houseNumber));
+            const norm = normHn(attrs.houseNumber);
+            if (norm == null) {
+                continue;
+            }
+            let street = '';
+            try {
+                street = W.model.streets.getObjectById(attrs.streetID)?.attributes?.name || '';
+            } catch { /* unresolved street — geometric fallback below */ }
+            if (street && segInfos.some((si) => streetsMatch(street, si.streetName))) {
+                nums.add(norm);
+                continue;
+            }
+            const pt = venueCentroidLonLat(venue);
+            if (pt && segInfos.some((si) => metersToLine(pt[0], pt[1], si.line) <= corridor)) {
+                nums.add(norm);
             }
         }
         return nums;
@@ -1381,9 +1399,7 @@
                     existingNums.add(normHn(a.number));
                 }
             }
-            for (const n of existingRppNumbers(streetIds)) {
-                existingNums.add(n);
-            }
+            const rppNums = existingRppNumbers(segInfos, hnCorridorM());
             const plrSegs = loadedPlrSegments();
 
             setHnStatus('⏳ Querying GIS address points along the selection…', '#06c');
@@ -1398,6 +1414,7 @@
             const missing = [];
             const mismatch = [];
             let presentCount = 0;
+            let rppCoveredCount = 0;
             const corridor = hnCorridorM();
             const corridorMin = hnCorridorMinM();
             for (const p of gis.points) {
@@ -1417,6 +1434,10 @@
                     continue;
                 }
                 const norm = normHn(p.hn);
+                if (rppNums.has(norm)) {
+                    rppCoveredCount++;   // an RPP outranks a segment HN — never propose
+                    continue;
+                }
                 if (existingNums.has(norm) || hnSessionAdded.has(hnKey(p.street, p.hn))) {
                     presentCount++;
                     continue;
@@ -1469,9 +1490,10 @@
                 capped ? `first ${HN_CONFIG.maxSegmentsPerScan} of ${ids.length} selected segments` : '',
                 skipped.length ? `${skipped.length} segment(s) skipped (street not loaded)` : '',
             ].filter(Boolean).join(' · ');
-            const onStreet = presentCount + missing.length;
+            const onStreet = presentCount + rppCoveredCount + missing.length;
             const bandDesc = corridorMin > 0 ? `${corridorMin}–${corridor}m band` : `within ${corridor}m`;
             const tallyLine = `GIS: ${gis.points.length} point(s) fetched, ${onStreet} on-street (${bandDesc}) · ${presentCount} already mapped`
+                + `${rppCoveredCount ? ` · ${rppCoveredCount} covered by RPPs` : ''}`
                 + ` · <b>${missing.length} missing</b> · ${mismatch.length} street-mismatch`
                 + `<br><span style="color:#235;">🗺️ ${srcDesc}</span>${notes ? `<br><span style="color:#888;">${notes}</span>` : ''}`;
             if (onStreet === 0) {
