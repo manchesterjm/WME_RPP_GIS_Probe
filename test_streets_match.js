@@ -8,7 +8,6 @@ const path = require('path');
 
 const src = fs.readFileSync(path.join(__dirname, 'wme-rpp-gis-probe.user.js'), 'utf8');
 const grab = (from, to) => src.slice(src.indexOf(from), src.indexOf(to));
-// eslint-disable-next-line no-eval
 eval(grab('const STREET_TYPES', 'let wmeSdk') + grab('function normalizeStreet', '// ---- GIS query'));
 
 const cases = [
