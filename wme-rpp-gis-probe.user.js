@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.21.15';
+    const SCRIPT_VERSION = '2026.07.21.16';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -310,6 +310,25 @@
                 city: a.ZIP_COMM || '',
                 zip: a.ZIPCODE || '',
                 subtype: a.ADDR_TYPE || '',
+            }),
+        },
+        {
+            id: 'mesa',
+            name: 'Mesa County (E911)',
+            // Not in the GIS Layers sheet at all — found via the county's Open
+            // Data hub 2026-07-21 (their old gis.mesacounty.us ArcGIS server is
+            // retired; mcgis is current). E911 point set, ~90k addresses.
+            url: 'https://mcgis.mesacounty.us/arcgis/rest/services/maps/Open_Data/FeatureServer/52/query',
+            bbox: [-109.059, 38.502, -107.45, 39.366],
+            fields: (a) => ({
+                hn: a.COMB_HOUSE_NUMBER || a.HOUSE_NUMBER,
+                street: joinStreet([
+                    a.PREFIX_DIRECTION, a.PREFIX_TYPE, a.STREET_NAME, a.STREET_TYPE, a.SUFFIX_DIRECTION,
+                ]),
+                address: a.LOCATION || '',
+                city: a.CITY || '',
+                zip: a.ZIP || '',
+                subtype: '',
             }),
         },
         {
