@@ -52,8 +52,17 @@ const cases = [
     ['Talon Loop', 'TALON', true],                   // GIS bare form, one-sided strip
     ['Talon Loop', 'TALON TRL', false],              // conflicting types still refuse
     ['Highway View Dr', 'HIGHWAY VIEW DR', true],    // route words inside a real name: untouched
+    // Cardinal directionals (2026-07-21, Josh: translate + one-sided ignore):
+    ['E Woodmen Rd', 'WOODMEN RD', true],            // FLIPPED from the old intentional gap: one-sided dir ignored
+    ['E Woodmen Rd', 'EAST WOODMEN RD', true],       // spelled-out translator
+    ['Woodmen Rd', 'EAST WOODMEN ROAD', true],
+    ['North Pines Trl', 'N PINES TRL', true],        // name-leading North still matches its abbreviated twin
+    ['North Pines Trl', 'PINES TRL', true],          // one-sided ignore (accepted looseness, corridor limits damage)
+    ['N Academy Blvd', 'ACADEMY BLVD N', true],      // same dir, position-blind
+    ['S Union Blvd', 'UNION BOULEVARD SOUTH', true],
     // Must REFUSE:
-    ['E Woodmen Rd', 'WOODMEN RD', false],           // missing directional = real flag (intentional gap)
+    ['E Woodmen Rd', 'W WOODMEN RD', false],         // conflicting directionals = different streets
+    ['NE Circle Dr', 'SW CIRCLE DR', false],
     ['Estes St', 'ESTES PARK', false],
     ['Sage Brush Way', 'SAGE BRUSH TRL', false],     // conflicting types = different streets
     ['Sunset View', 'SUNSET WAY', false],

@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.21.13';
+    const SCRIPT_VERSION = '2026.07.21.14';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -538,6 +538,17 @@
         return null;
     }
 
+    // Cardinal directionals (2026-07-21): TRANSLATE spelled-out forms at the
+    // name's ends (EAST WOODMEN → E WOODMEN — positional, so a mid-name "North"
+    // is never touched), then in streetsMatch: a directional present on ONE side
+    // only is IGNORED (source omitted it — Josh: "in some cases just ignore"),
+    // while CONFLICTING directionals refuse (E Woodmen ≠ W Woodmen).
+    const DIR_CANON = {
+        NORTH: 'N', SOUTH: 'S', EAST: 'E', WEST: 'W',
+        NORTHEAST: 'NE', NORTHWEST: 'NW', SOUTHEAST: 'SE', SOUTHWEST: 'SW',
+    };
+    const DIR_SET = new Set(['N', 'S', 'E', 'W', 'NE', 'NW', 'SE', 'SW']);
+
     function normalizeStreet(name) {
         if (!name) {
             return '';
@@ -550,38 +561,91 @@
         if (route) {
             return route;
         }
-        return cleaned.split(' ').map((tok) => STREET_TYPES[tok] || tok).join(' ');
+        const tokens = cleaned.split(' ');
+        if (tokens.length > 1 && DIR_CANON[tokens[0]]) {
+            tokens[0] = DIR_CANON[tokens[0]];
+        }
+        if (tokens.length > 1 && DIR_CANON[tokens[tokens.length - 1]]) {
+            tokens[tokens.length - 1] = DIR_CANON[tokens[tokens.length - 1]];
+        }
+        return tokens.map((tok) => STREET_TYPES[tok] || tok).join(' ');
+    }
+
+    // The directional a normalized name carries (leading preferred, else
+    // trailing post-directional), or null.
+    function dirOf(n) {
+        const t = n.split(' ');
+        if (t.length > 1 && DIR_SET.has(t[0])) {
+            return t[0];
+        }
+        if (t.length > 1 && DIR_SET.has(t[t.length - 1])) {
+            return t[t.length - 1];
+        }
+        return null;
+    }
+
+    function stripDirs(n) {
+        const t = n.split(' ');
+        if (t.length > 1 && DIR_SET.has(t[0])) {
+            t.shift();
+        }
+        if (t.length > 1 && DIR_SET.has(t[t.length - 1])) {
+            t.pop();
+        }
+        return t.join(' ');
     }
 
     const TYPE_ABBREVS = new Set(Object.values(STREET_TYPES));
 
-    function streetCore(name) {
-        const tokens = normalizeStreet(name).split(' ');
+    function coreFromNorm(n) {
+        const tokens = n.split(' ');
         if (tokens.length > 1 && TYPE_ABBREVS.has(tokens[tokens.length - 1])) {
             tokens.pop();
         }
         return tokens.join(' ');
     }
 
-    // Exact normalized match, OR one side minus its trailing type equals the OTHER
-    // SIDE IN FULL. Stripping from one side at a time is the key (v2026.07.21.3):
-    // it accepts a source that omits the type ("Big Johnson Dr" vs "BIG JOHNSON")
-    // AND names whose last word merely LOOKS like a type — "Sunset View Way" vs
-    // GIS "SUNSET VIEW" matches (strip WAY → SUNSET VW = the GIS name in full),
-    // while "Sage Brush Way" vs "SAGE BRUSH TRL" still refuses (stripping either
-    // side never yields the other side whole). The old both-sides core compare
-    // failed the first and matched the second — both wrong.
+    function streetCore(name) {
+        return coreFromNorm(normalizeStreet(name));
+    }
+
+    // Two NORMALIZED names: exact match, OR one side minus its trailing type
+    // equals the OTHER SIDE IN FULL (one-sided strip, v.3: accepts an omitted
+    // type AND names ending in type-looking words, refuses conflicting types),
+    // each also tried space-squashed (v.4: "Needle Leaf" vs "NEEDLELEAF").
+    function pairMatches(x, y) {
+        if (x === y || coreFromNorm(x) === y || coreFromNorm(y) === x) {
+            return true;
+        }
+        const sq = (s) => s.replace(/ /g, '');
+        return sq(x) === sq(y) || sq(coreFromNorm(x)) === sq(y) || sq(coreFromNorm(y)) === sq(x);
+    }
+
+    // v.14 directional layer on top: conflicting directionals refuse outright;
+    // a directional on ONE side only is ignored (one-sided strip, same doctrine
+    // as types); same directional on BOTH sides also matches position-blind
+    // ("N ACADEMY BLVD" vs "ACADEMY BLVD N").
     function streetsMatch(a, b) {
         const na = normalizeStreet(a);
         const nb = normalizeStreet(b);
-        if (na === nb || streetCore(a) === nb || streetCore(b) === na) {
+        const da = dirOf(na);
+        const db = dirOf(nb);
+        if (da && db && da !== db) {
+            return false;
+        }
+        if (pairMatches(na, nb)) {
             return true;
         }
-        // Space-insensitive fallback (v2026.07.21.4): sources disagree on word
-        // boundaries — WME "Needle Leaf Ln" vs GIS "NEEDLELEAF". Same three
-        // comparisons with all spaces squashed out.
-        const sq = (s) => s.replace(/ /g, '');
-        return sq(na) === sq(nb) || sq(streetCore(a)) === sq(nb) || sq(streetCore(b)) === sq(na);
+        if (da && !db) {
+            return pairMatches(stripDirs(na), nb);
+        }
+        if (db && !da) {
+            return pairMatches(na, stripDirs(nb));
+        }
+        if (da && db) {
+            return pairMatches(stripDirs(na), stripDirs(nb));
+        }
+        return false;
     }
 
     // ---- GIS query ------------------------------------------------------------
