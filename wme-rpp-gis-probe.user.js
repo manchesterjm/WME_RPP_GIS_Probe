@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.21.3';
+    const SCRIPT_VERSION = '2026.07.21.4';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -322,7 +322,14 @@
     function streetsMatch(a, b) {
         const na = normalizeStreet(a);
         const nb = normalizeStreet(b);
-        return na === nb || streetCore(a) === nb || streetCore(b) === na;
+        if (na === nb || streetCore(a) === nb || streetCore(b) === na) {
+            return true;
+        }
+        // Space-insensitive fallback (v2026.07.21.4): sources disagree on word
+        // boundaries — WME "Needle Leaf Ln" vs GIS "NEEDLELEAF". Same three
+        // comparisons with all spaces squashed out.
+        const sq = (s) => s.replace(/ /g, '');
+        return sq(na) === sq(nb) || sq(streetCore(a)) === sq(nb) || sq(streetCore(b)) === sq(na);
     }
 
     // ---- GIS query ------------------------------------------------------------
