@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.21.12';
+    const SCRIPT_VERSION = '2026.07.21.13';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -995,8 +995,12 @@
     const hnSessionAdded = new Set(); // "street|hn" keys added this session (fetch won't see unsaved adds)
     let hnPendingRows = [];           // current scan's missing rows — {c, span, btn, done}; Add-all walks this
 
-    // User-adjustable search distance (corridor from the road centerline).
-    const HN_CORRIDOR_STORE = 'hnFiller.corridorM';
+    // User-adjustable search distance BAND (min–max from the road centerline).
+    // Max = the corridor; min > 0 excludes near-road houses so the far-off ones
+    // can be targeted for RPPs (Josh's ask 2026-07-21). Min defaults to 0 =
+    // band off, identical to the old single-distance behavior.
+    const HN_CORRIDOR_STORE = 'hnFiller.corridorM';        // max (pre-band saves carry over)
+    const HN_CORRIDOR_MIN_STORE = 'hnFiller.corridorMinM';
 
     function clampCorridor(v) {
         const n = Math.round(Number(v));
@@ -1019,6 +1023,29 @@
         try {
             localStorage.setItem(HN_CORRIDOR_STORE, String(clampCorridor(v)));
         } catch { /* private mode etc. — session keeps the default */ }
+    }
+
+    function clampCorridorMin(v) {
+        const n = Math.round(Number(v));
+        if (!isFinite(n) || n < 0) {
+            return 0;
+        }
+        return Math.min(hnCorridorM() - 10, n);   // always leave a 10m band open
+    }
+
+    function hnCorridorMinM() {
+        try {
+            const saved = localStorage.getItem(HN_CORRIDOR_MIN_STORE);
+            return saved == null ? 0 : clampCorridorMin(saved);
+        } catch {
+            return 0;
+        }
+    }
+
+    function setHnCorridorMinM(v) {
+        try {
+            localStorage.setItem(HN_CORRIDOR_MIN_STORE, String(clampCorridorMin(v)));
+        } catch { /* private mode etc. */ }
     }
 
     // GIS radius per sample: must cover half a sample step along the road plus
@@ -1308,10 +1335,14 @@
             const mismatch = [];
             let presentCount = 0;
             const corridor = hnCorridorM();
+            const corridorMin = hnCorridorMinM();
             for (const p of gis.points) {
                 const lineDist = Math.min(...segInfos.map((si) => metersToLine(p.lon, p.lat, si.line)));
                 if (lineDist > corridor) {
                     continue;   // another block/parallel street — not this road's frontage
+                }
+                if (lineDist < corridorMin) {
+                    continue;   // inside the band's near edge — user is targeting far-off houses
                 }
                 if (!segInfos.some((si) => streetsMatch(p.street, si.streetName))) {
                     // Report-only, and only when it's AT the curb (a different street
@@ -1375,7 +1406,8 @@
                 skipped.length ? `${skipped.length} segment(s) skipped (street not loaded)` : '',
             ].filter(Boolean).join(' · ');
             const onStreet = presentCount + missing.length;
-            const tallyLine = `GIS: ${gis.points.length} point(s) fetched, ${onStreet} on-street (within ${corridor}m) · ${presentCount} already mapped`
+            const bandDesc = corridorMin > 0 ? `${corridorMin}–${corridor}m band` : `within ${corridor}m`;
+            const tallyLine = `GIS: ${gis.points.length} point(s) fetched, ${onStreet} on-street (${bandDesc}) · ${presentCount} already mapped`
                 + ` · <b>${missing.length} missing</b> · ${mismatch.length} street-mismatch`
                 + `<br><span style="color:#235;">🗺️ ${srcDesc}</span>${notes ? `<br><span style="color:#888;">${notes}</span>` : ''}`;
             if (onStreet === 0) {
@@ -1592,8 +1624,10 @@
               <div id="hn-filler-selline" style="margin:4px 0 8px;padding:5px 8px;background:#f3f6ff;border-left:3px solid #06c;border-radius:3px;font-size:11px;color:#235;">Select a road segment on the map (multi-select OK).</div>
               <div style="margin:4px 0 8px;font-size:11px;color:#444;">
                 Search distance:
-                <input id="hn-filler-corridor" type="number" min="${HN_CONFIG.corridorMinM}" max="${HN_CONFIG.corridorMaxM}" step="10" style="width:60px;padding:2px 4px;" title="How far from the road centerline to look for GIS address points (meters). Raise it on big rural parcels where houses sit far up their driveways.">
-                m from the road <span style="color:#888;">(default ${HN_CONFIG.corridorM})</span>
+                <input id="hn-filler-corridor-min" type="number" min="0" max="${HN_CONFIG.corridorMaxM - 10}" step="10" style="width:55px;padding:2px 4px;" title="Minimum distance from the road centerline (meters). Set above 0 to see ONLY far-off houses — e.g. 150 to target the ones that should become RPPs.">
+                –
+                <input id="hn-filler-corridor" type="number" min="${HN_CONFIG.corridorMinM}" max="${HN_CONFIG.corridorMaxM}" step="10" style="width:55px;padding:2px 4px;" title="Maximum distance from the road centerline (meters). Raise it on big rural parcels where houses sit far up their driveways.">
+                m from the road <span style="color:#888;">(default 0–${HN_CONFIG.corridorM})</span>
               </div>
               <button id="hn-filler-scan" disabled style="padding:7px 12px;background:#06c;color:#fff;border:none;border-radius:5px;font-size:13px;font-weight:bold;cursor:pointer;">🔢 Scan selected segment(s)</button>
               <button id="hn-filler-addall" title="Add every listed missing house number (same reviewed path as the row buttons; all unsaved until you save in WME)" style="display:none;margin-left:6px;padding:7px 12px;background:#0a7;color:#fff;border:none;border-radius:5px;font-size:13px;font-weight:bold;cursor:pointer;">Add all</button>
@@ -1607,10 +1641,18 @@
         hnAddAllRef = tabPane.querySelector('#hn-filler-addall');
         hnAddAllRef.addEventListener('click', hnAddAll);
         const corridorInput = tabPane.querySelector('#hn-filler-corridor');
+        const corridorMinInput = tabPane.querySelector('#hn-filler-corridor-min');
         corridorInput.value = hnCorridorM();
+        corridorMinInput.value = hnCorridorMinM();
         corridorInput.addEventListener('change', () => {
             setHnCorridorM(corridorInput.value);
-            corridorInput.value = hnCorridorM();   // reflect the clamped value back
+            corridorInput.value = hnCorridorM();          // reflect the clamped value back
+            setHnCorridorMinM(corridorMinInput.value);    // re-clamp min against the new max
+            corridorMinInput.value = hnCorridorMinM();
+        });
+        corridorMinInput.addEventListener('change', () => {
+            setHnCorridorMinM(corridorMinInput.value);
+            corridorMinInput.value = hnCorridorMinM();
         });
         hnButtonRef.addEventListener('click', () => {
             hnScanSelected().catch((e) => {
