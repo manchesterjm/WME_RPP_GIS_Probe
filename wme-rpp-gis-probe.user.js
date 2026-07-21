@@ -150,8 +150,9 @@
     // 🔢 HN Filler tunables (separate from the probe's — different geometry problem:
     // corridor along a street line, not a radius around a point).
     const HN_CONFIG = {
-        corridorM: 150,         // on-street match corridor — rural lots set houses 60-120m back
-                                //   (Loblolly Pine Cir, Elbert Co 2026-07-21: real points sat 57-111m off the line)
+        // Rural lots set houses 60-120m back from the centerline (Loblolly Pine
+        // Cir, Elbert Co 2026-07-21: real points sat 57-111m off the line).
+        corridorM: 150,         // on-street match corridor
         mismatchCorridorM: 55,  // street-MISMATCH reporting stays tight: another street 100m out is normal, not a discrepancy
         sampleStepM: 80,        // spacing of GIS query samples along the segment
         queryRadiusM: 165,      // per-sample GIS radius (covers half a step along + the corridor across)
@@ -989,7 +990,7 @@
                 // "Nothing in GIS" must never read as "all mapped" — new construction
                 // can lag the source (that's this tool's whole use case).
                 setHnStatus(`⚠️ Done ${at} — <b>${streets}</b>: the GIS source has NO on-street address points along this`
-                    + ` selection. That means no data to compare — NOT that the map is complete (new construction may`
+                    + ' selection. That means no data to compare — NOT that the map is complete (new construction may'
                     + ` lag the source).<br>${tallyLine}`, '#b26a00');
             } else if (missing.length === 0) {
                 setHnStatus(`✅ Done ${at} — <b>${streets}</b>: all ${onStreet} GIS house number(s) here are already mapped.<br>${tallyLine}`, '#0a7');
