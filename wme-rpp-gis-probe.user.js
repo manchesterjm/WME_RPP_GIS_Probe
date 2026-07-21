@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.21.4';
+    const SCRIPT_VERSION = '2026.07.21.5';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -152,10 +152,13 @@
     const HN_CONFIG = {
         // Rural lots set houses 60-120m back from the centerline (Loblolly Pine
         // Cir, Elbert Co 2026-07-21: real points sat 57-111m off the line).
-        corridorM: 150,         // on-street match corridor
+        // DEFAULT only — the tab has a user-editable "Search distance" field
+        // (persisted in localStorage) because big parcels put houses 200m+ out.
+        corridorM: 150,         // on-street match corridor (default)
+        corridorMinM: 30,       // sanity clamp for the user field
+        corridorMaxM: 1000,
         mismatchCorridorM: 55,  // street-MISMATCH reporting stays tight: another street 100m out is normal, not a discrepancy
         sampleStepM: 80,        // spacing of GIS query samples along the segment
-        queryRadiusM: 165,      // per-sample GIS radius (covers half a step along + the corridor across)
         maxSegmentsPerScan: 10, // selection cap per scan
         maxAddsPerScan: 50,     // hard cap on Add clicks per scan (guardrail)
         minZoom: 17,            // same rationale as the probe: model not reliably loaded below this
@@ -743,6 +746,38 @@
     let hnAddsThisScan = 0;
     const hnSessionAdded = new Set(); // "street|hn" keys added this session (fetch won't see unsaved adds)
 
+    // User-adjustable search distance (corridor from the road centerline).
+    const HN_CORRIDOR_STORE = 'hnFiller.corridorM';
+
+    function clampCorridor(v) {
+        const n = Math.round(Number(v));
+        if (!isFinite(n)) {
+            return HN_CONFIG.corridorM;
+        }
+        return Math.min(HN_CONFIG.corridorMaxM, Math.max(HN_CONFIG.corridorMinM, n));
+    }
+
+    function hnCorridorM() {
+        try {
+            const saved = localStorage.getItem(HN_CORRIDOR_STORE);
+            return saved == null ? HN_CONFIG.corridorM : clampCorridor(saved);
+        } catch {
+            return HN_CONFIG.corridorM;
+        }
+    }
+
+    function setHnCorridorM(v) {
+        try {
+            localStorage.setItem(HN_CORRIDOR_STORE, String(clampCorridor(v)));
+        } catch { /* private mode etc. — session keeps the default */ }
+    }
+
+    // GIS radius per sample: must cover half a sample step along the road plus
+    // the corridor across it, whatever the user set the corridor to.
+    function hnQueryRadiusM() {
+        return Math.round(Math.hypot(HN_CONFIG.sampleStepM / 2, hnCorridorM())) + 15;
+    }
+
     // House-number strings compare as normalized text ("123 A" == "123a"; letters + ½ pass through).
     function normHn(v) {
         const s = String(v ?? '').trim().toUpperCase().replace(/\s+/g, ' ');
@@ -839,14 +874,15 @@
         let activeSource = requestedLocal || STATEWIDE_SOURCE;
         let usedFallback = false;
         const seen = new Map();   // key → point
+        const radius = hnQueryRadiusM();
         for (const si of segInfos) {
             for (const [lon, lat] of samplePointsAlong(si.line)) {
-                let { error, points } = await queryOneSource(activeSource, lon, lat, HN_CONFIG.queryRadiusM);
+                let { error, points } = await queryOneSource(activeSource, lon, lat, radius);
                 if (error && activeSource.id !== STATEWIDE_SOURCE.id) {
                     console.warn(`${HN_LOG} ${activeSource.name} failed (${error}) → statewide fallback for the rest of this scan.`);
                     usedFallback = true;
                     activeSource = STATEWIDE_SOURCE;
-                    ({ error, points } = await queryOneSource(activeSource, lon, lat, HN_CONFIG.queryRadiusM));
+                    ({ error, points } = await queryOneSource(activeSource, lon, lat, radius));
                 }
                 if (error) {
                     return { error, points: [], source: activeSource, usedFallback };
@@ -969,9 +1005,10 @@
             const missing = [];
             const mismatch = [];
             let presentCount = 0;
+            const corridor = hnCorridorM();
             for (const p of gis.points) {
                 const lineDist = Math.min(...segInfos.map((si) => metersToLine(p.lon, p.lat, si.line)));
-                if (lineDist > HN_CONFIG.corridorM) {
+                if (lineDist > corridor) {
                     continue;   // another block/parallel street — not this road's frontage
                 }
                 if (!segInfos.some((si) => streetsMatch(p.street, si.streetName))) {
@@ -996,7 +1033,7 @@
                         best = { id: f.id, d };
                     }
                 }
-                if (!best || best.d > HN_CONFIG.corridorM) {
+                if (!best || best.d > corridor) {
                     continue;
                 }
                 missing.push({
@@ -1023,7 +1060,7 @@
                 skipped.length ? `${skipped.length} segment(s) skipped (street not loaded)` : '',
             ].filter(Boolean).join(' · ');
             const onStreet = presentCount + missing.length;
-            const tallyLine = `GIS: ${gis.points.length} point(s) fetched, ${onStreet} on-street · ${presentCount} already mapped`
+            const tallyLine = `GIS: ${gis.points.length} point(s) fetched, ${onStreet} on-street (within ${corridor}m) · ${presentCount} already mapped`
                 + ` · <b>${missing.length} missing</b> · ${mismatch.length} street-mismatch`
                 + `<br><span style="color:#235;">🗺️ ${srcDesc}</span>${notes ? `<br><span style="color:#888;">${notes}</span>` : ''}`;
             if (onStreet === 0) {
@@ -1136,6 +1173,11 @@
               <h2 style="font-size:14px;margin:6px 0;">🔢 HN Filler <span style="font-weight:normal;color:#888;font-size:10px;">v${SCRIPT_VERSION}</span></h2>
               <p style="color:#555;margin:4px 0 8px;">Select road segment(s), scan, review the house numbers GIS has but the map is missing, add each with one click. Adds are <b>unsaved</b> until you save in WME — review with the House Numbers layer on.</p>
               <div id="hn-filler-selline" style="margin:4px 0 8px;padding:5px 8px;background:#f3f6ff;border-left:3px solid #06c;border-radius:3px;font-size:11px;color:#235;">Select a road segment on the map (multi-select OK).</div>
+              <div style="margin:4px 0 8px;font-size:11px;color:#444;">
+                Search distance:
+                <input id="hn-filler-corridor" type="number" min="${HN_CONFIG.corridorMinM}" max="${HN_CONFIG.corridorMaxM}" step="10" style="width:60px;padding:2px 4px;" title="How far from the road centerline to look for GIS address points (meters). Raise it on big rural parcels where houses sit far up their driveways.">
+                m from the road <span style="color:#888;">(default ${HN_CONFIG.corridorM})</span>
+              </div>
               <button id="hn-filler-scan" disabled style="padding:7px 12px;background:#06c;color:#fff;border:none;border-radius:5px;font-size:13px;font-weight:bold;cursor:pointer;">🔢 Scan selected segment(s)</button>
               <button id="hn-filler-addall" disabled title="Disabled until the per-row Add flow has proven itself in real use." style="display:none;margin-left:6px;padding:7px 12px;background:#aaa;color:#fff;border:none;border-radius:5px;font-size:13px;cursor:not-allowed;">Add all</button>
               <div id="hn-filler-status" style="margin:8px 0;padding:6px 8px;background:#f3f3f3;border-radius:4px;font-size:11px;color:#444;">Idle — select a segment and click <b>Scan</b>.</div>
@@ -1146,6 +1188,12 @@
         hnResultsRef = tabPane.querySelector('#hn-filler-results');
         hnButtonRef = tabPane.querySelector('#hn-filler-scan');
         hnAddAllRef = tabPane.querySelector('#hn-filler-addall');
+        const corridorInput = tabPane.querySelector('#hn-filler-corridor');
+        corridorInput.value = hnCorridorM();
+        corridorInput.addEventListener('change', () => {
+            setHnCorridorM(corridorInput.value);
+            corridorInput.value = hnCorridorM();   // reflect the clamped value back
+        });
         hnButtonRef.addEventListener('click', () => {
             hnScanSelected().catch((e) => {
                 setHnScanning(false);
