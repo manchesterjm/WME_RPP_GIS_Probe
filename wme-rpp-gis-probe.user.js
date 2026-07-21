@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.21.22';
+    const SCRIPT_VERSION = '2026.07.21.23';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -377,6 +377,12 @@
         // case; the nearest-point rule is distance-ranked, so a bigger radius
         // doesn't loosen verdicts.
         queryRadiusM: 500,     // how far around an RPP to pull authoritative points
+        // The nearest-point rule alone breaks in SPARSE country (2026-07-21,
+        // Mesa Co): a pin 150m+ wrong can still have its own point nearest
+        // because the next house is farther still. A correctly placed pin sits
+        // at/near the structure whatever the driveway length, so beyond this
+        // the pin is misplaced even with no closer neighbor.
+        farOwnM: 100,
         wellPlacedM: 12,       // fast-path: matched point this close → definitely on the right lot, skip the neighbor check
         misplacedMarginM: 8,   // a DIFFERENT address must be at least this much closer than the RPP's own point to call it misplaced (robust to rooftop-vs-frontyard offset; tune up = more conservative)
         wrongHnCloseM: 8,      // a *different*-HN point this close suggests the RPP's HN is wrong
@@ -821,6 +827,17 @@
                 return {
                     code: 'misplaced',
                     msg: `MISPLACED — pin is ${own.dist.toFixed(1)}m from its own "${own.address}", but "${nearestOther.address}" sits closer (${nearestOther.dist.toFixed(1)}m) → likely on the wrong lot; correct location (${own.lon.toFixed(6)}, ${own.lat.toFixed(6)})`,
+                    target: own,
+                    annotated,
+                };
+            }
+            // Sparse-country cap (v.23): own-point-nearest is no excuse beyond
+            // farOwnM — with no neighbors for 100m+, a badly misplaced rural pin
+            // otherwise verdicts `ok` (Mesa Co 2026-07-21).
+            if (own.dist > CONFIG.farOwnM) {
+                return {
+                    code: 'misplaced',
+                    msg: `MISPLACED — pin is ${own.dist.toFixed(1)}m from its own "${own.address}" (beyond the ${CONFIG.farOwnM}m cap; no other address nearer); correct location (${own.lon.toFixed(6)}, ${own.lat.toFixed(6)})`,
                     target: own,
                     annotated,
                 };

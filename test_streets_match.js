@@ -48,6 +48,7 @@ const cases = [
     ['CR-59A', 'COUNTY ROAD 59A', true],             // letter-suffixed route number
     // Route concurrencies + ambiguous HIGHWAY (2026-07-21, Mesa US-6/US-50):
     ['US-50', 'HIGHWAY 6 AND 50', true],             // concurrency matches either member
+    ['US-50', 'HWY 6 AND 50', true],                 // Mesa E911's actual stored spelling
     ['US-6', 'HWY 6 AND 50', true],
     ['US-50', 'HIGHWAY 50', true],                   // bare HIGHWAY wildcards against US
     ['SH-105', 'HIGHWAY 105', true],                 // …and against SH
