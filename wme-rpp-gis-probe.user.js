@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.21.10';
+    const SCRIPT_VERSION = '2026.07.21.11';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -120,6 +120,211 @@
                 city: a.POSTAL_NAME || '',
                 zip: a.ZIP_CODE || '',
                 subtype: a.ADDRESS_USE || '',
+            }),
+        },
+        // ── CO county bulk-add (2026-07-21, Josh's ruling: statewide = LAST
+        // resort — it lags new construction and can carry pre-replat street
+        // names). Wired from the WME GIS Layers sheet; every entry below was
+        // schema-probed + live-queried (except Adams: Cloudflare-gated to curl,
+        // schema from the sheet's label field — error/empty falls back to
+        // statewide anyway). bboxes = each layer's own 4326 data extent, listed
+        // MOST-SPECIFIC (smallest) FIRST so overlapping edges resolve narrow.
+        // Excluded as dead/unusable upstream: Delta, Montrose, Rio Blanco,
+        // Gilpin, Teller (DNS gone), Park (HTML at REST), Sedgwick + Commerce
+        // City (timeouts), San Miguel (parcel-OWNERSHIP points, no addresses).
+        {
+            id: 'broomfield',
+            name: 'Broomfield County',
+            url: 'https://services1.arcgis.com/vXSRPZbyyOmH9pek/arcgis/rest/services/Addresses/FeatureServer/0/query',
+            bbox: [-105.164, 39.889, -104.951, 40.044],
+            fields: (a) => ({
+                hn: a.ADDRESS_NUMBER,
+                street: joinStreet([
+                    a.STREET_PREDIRECTIONAL, a.STREET_PRETYPE, a.STREET_NAME, a.STREET_POSTTYPE, a.STREET_POSTDIRECTIONAL,
+                ]),
+                address: a.FULL_ADDRESS || '',
+                city: a.CITY || '',
+                zip: a.ZIPCODE || '',
+                subtype: a.FEATURE_TYPE || '',
+            }),
+        },
+        {
+            id: 'boulder',
+            name: 'Boulder County',
+            url: 'https://maps.bouldercounty.org/arcgis/rest/services/PARCELS/ADDRESS_POINTS/MapServer/0/query',
+            bbox: [-105.646, 39.912, -105.051, 40.263],
+            fields: (a) => ({
+                hn: a.STREET_NUMBER,
+                street: joinStreet([a.PREFIX, a.PRETYPE, a.STREETNAME, a.STREETTYPE, a.SUFFIX]),
+                address: a.FULL_ADDRESS || '',
+                city: a.POSTAL_CITY || a.CITY || '',
+                zip: a.ZIPCODE || '',
+                subtype: a.ADDRESS_SOURCE || '',
+            }),
+        },
+        {
+            id: 'jefferson',
+            name: 'Jefferson County',
+            // No bare house-number field — parse it off the full ADDRESS.
+            url: 'https://mapservices2.jeffco.us/arcgis/rest/services/jMap/Address/MapServer/0/query',
+            bbox: [-105.399, 39.182, -105.053, 39.914],
+            fields: (a) => ({
+                hn: String(a.ADDRESS || '').trim().split(' ')[0],
+                street: joinStreet([
+                    a.STREET_DIRECTION_PREFIX, a.STREET_NAME, a.STREET_TYPE, a.STREET_DIRECTION_SUFFIX,
+                ]),
+                address: a.ADDRESS || '',
+                city: a.CITY_POSTAL || '',
+                zip: a.ZIP || '',
+                subtype: a.ADDRESS_TYPE || '',
+            }),
+        },
+        {
+            id: 'arapahoe',
+            name: 'Arapahoe County',
+            url: 'https://gis.arapahoegov.com/arcgis/rest/services/OpenDataService/MapServer/4/query',
+            bbox: [-105.058, 39.549, -103.715, 39.787],
+            fields: (a) => ({
+                hn: a.Number,
+                street: joinStreet([a.Pre_Direction, a.Street_Name, a.Street_Type, a.Suffix_Direction]),
+                address: a.Full_Address || '',
+                city: a.City_State || '',
+                zip: a.Zip || '',
+                subtype: a.Bldg_Type || '',
+            }),
+        },
+        {
+            id: 'pitkin',
+            name: 'Pitkin County',
+            url: 'https://gispub.cityofaspen.com/server/rest/services/PitkinCounty/Pitkin_Layers/MapServer/1/query',
+            bbox: [-107.367, 38.997, -106.495, 39.401],
+            fields: (a) => ({
+                hn: a.STREET_NU,
+                street: a.NAME || '',
+                address: a.ADDRESS || '',
+                city: '',
+                zip: a.ZIP || '',
+                subtype: a.AddressType || '',
+            }),
+        },
+        {
+            id: 'adams',
+            name: 'Adams County',
+            // ⚠️ Cloudflare-challenged to plain curl — schema from the GIS Layers
+            // sheet (label field ADDR_FULL), NOT live-probed. bbox ≈ county
+            // bounds. If the challenge also blocks GM_xmlhttpRequest, the
+            // error/empty fallback rides statewide as before.
+            url: 'https://gisapp.adcogov.org/arcgis/rest/services/AdamsCountyBasic/MapServer/32/query',
+            bbox: [-105.053, 39.738, -103.706, 40.003],
+            fields: (a) => ({
+                hn: String(a.ADDR_FULL || '').trim().split(' ')[0],
+                street: String(a.ADDR_FULL || '').trim().split(' ').slice(1).join(' '),
+                address: a.ADDR_FULL || '',
+                city: '',
+                zip: '',
+                subtype: '',
+            }),
+        },
+        {
+            id: 'montezuma',
+            name: 'Montezuma County',
+            url: 'https://gis-server.co.montezuma.co.us/arcgis/rest/services/Address_Verification_Viewer/MapServer/0/query',
+            bbox: [-109.041, 37.217, -108.066, 37.632],
+            fields: (a) => ({
+                hn: a.StreetNo,
+                street: joinStreet([a.StreetDir, a.StreetName, a.StreetSuf, a.StDirSuffx]),
+                address: joinStreet([a.StreetNo, a.StreetDir, a.StreetName, a.StreetSuf]),
+                city: a.City || '',
+                zip: a.ZipCode || '',
+                subtype: a.AddressUse || '',
+            }),
+        },
+        {
+            id: 'eagle',
+            name: 'Eagle County',
+            url: 'https://map.eaglecounty.us/arcgiswa/rest/services/FlexApp/Address_ForLabel/MapServer/0/query',
+            bbox: [-107.125, 39.354, -106.227, 39.924],
+            fields: (a) => ({
+                hn: a.STREETNO,
+                street: joinStreet([a.STREETDIR, a.STREETNAME, a.STREETSUF]),
+                address: a.Address || '',
+                city: a.LOCCITY || '',
+                zip: '',
+                subtype: '',
+            }),
+        },
+        {
+            id: 'pueblo',
+            name: 'Pueblo County',
+            // The sheet's PuebloCounty_AddressPoints service is gone; the live
+            // one (2026-07-21) is ..._AddressPointsLayer.
+            url: 'https://maps.co.pueblo.co.us/outside/rest/services/Landbase/PuebloCounty_AddressPointsLayer/MapServer/0/query',
+            bbox: [-105.052, 37.775, -104.051, 38.526],
+            fields: (a) => ({
+                hn: a.ADDRNUM,
+                street: joinStreet([a.STPREDIR, a.STPRETYPE, a.STNAME, a.STTYPE, a.STDIR]),
+                address: a.FULLADDR || '',
+                city: '',
+                zip: '',
+                subtype: '',
+            }),
+        },
+        {
+            id: 'routt',
+            name: 'Routt County',
+            url: 'https://services6.arcgis.com/VxFGFP4XeHMTNgVs/ArcGIS/rest/services/Routt_County_Addresses/FeatureServer/0/query',
+            bbox: [-107.458, 39.912, -106.639, 41.012],
+            fields: (a) => ({
+                hn: a.Add_Number,
+                street: a.LSt_FullNm || a.St_FullNm || '',
+                address: a.FullAddress || '',
+                city: a.Post_Comm || '',
+                zip: a.Post_Code || '',
+                subtype: '',
+            }),
+        },
+        {
+            id: 'grand',
+            name: 'Grand County',
+            url: 'https://gis.co.grand.co.us:6443/arcgis/rest/services/Property/AddressPoints/MapServer/0/query',
+            bbox: [-106.741, 39.702, -105.572, 40.539],
+            fields: (a) => ({
+                hn: a.STR_NUM,
+                street: joinStreet([a.ST_PDIR, a.ROAD_NAME, a.ST_TYPE, a.ST_SDIR]),
+                address: a.COMP_ADDR || '',
+                city: a.CITY || '',
+                zip: a.ZIP_CODE || '',
+                subtype: a.ADDTYPE || '',
+            }),
+        },
+        {
+            id: 'weld',
+            name: 'Weld County',
+            url: 'https://services.arcgis.com/ewjSqmSyHJnkfBLL/ArcGIS/rest/services/Address_Points_open_data/FeatureServer/1/query',
+            bbox: [-105.056, 40.001, -103.583, 41.001],
+            fields: (a) => ({
+                hn: a.HOUSENUM,
+                street: a.CC_FULLNAME || joinStreet([a.PRE_DIR, a.PRETYPE, a.STR_NAME, a.STR_TYPE, a.SUF_DIR]),
+                address: a.CC_FULLADDR || '',
+                city: a.ZIP_COMM || '',
+                zip: a.ZIPCODE || '',
+                subtype: a.ADDR_TYPE || '',
+            }),
+        },
+        {
+            id: 'lasanimas',
+            name: 'Las Animas County',
+            // NENA-style coded fields: SAN = house number, StName = full street,
+            // FSA = full address, MCN = community.
+            url: 'https://services7.arcgis.com/NWWOCaXnjdetEWUz/ArcGIS/rest/services/LasAnimasAddressPts/FeatureServer/0/query',
+            bbox: [-105.107, 36.972, -103.004, 37.803],
+            fields: (a) => ({
+                hn: a.SAN,
+                street: a.StName || '',
+                address: a.FSA || '',
+                city: a.MCN || '',
+                zip: a.ZIPCODE || '',
+                subtype: a.STRUCTURE || '',
             }),
         },
     ];
@@ -909,26 +1114,15 @@
         return turf.pointToLineDistance(turf.point([lon, lat]), line, { units: 'kilometers' }) * 1000;
     }
 
-    // Query the active source at every sample along every selected segment; merge +
-    // dedupe by (street, hn). Returns { error, points, source, usedFallback }.
-    async function queryGisAlongSegments(segInfos) {
-        const mid = samplePointsAlong(segInfos[0].line)[0];
-        const requestedLocal = pickLocalSource(mid[0], mid[1]);
-        let activeSource = requestedLocal || STATEWIDE_SOURCE;
-        let usedFallback = false;
+    // All samples along every selected segment against ONE source; merge +
+    // dedupe by (street, hn).
+    async function querySamplesWithSource(segInfos, source, radius) {
         const seen = new Map();   // key → point
-        const radius = hnQueryRadiusM();
         for (const si of segInfos) {
             for (const [lon, lat] of samplePointsAlong(si.line)) {
-                let { error, points } = await queryOneSource(activeSource, lon, lat, radius);
-                if (error && activeSource.id !== STATEWIDE_SOURCE.id) {
-                    console.warn(`${HN_LOG} ${activeSource.name} failed (${error}) → statewide fallback for the rest of this scan.`);
-                    usedFallback = true;
-                    activeSource = STATEWIDE_SOURCE;
-                    ({ error, points } = await queryOneSource(activeSource, lon, lat, radius));
-                }
+                const { error, points } = await queryOneSource(source, lon, lat, radius);
                 if (error) {
-                    return { error, points: [], source: activeSource, usedFallback };
+                    return { error, points: [] };
                 }
                 for (const p of points) {
                     if (p.lon == null || p.lat == null || normHn(p.hn) == null) {
@@ -941,7 +1135,28 @@
                 }
             }
         }
-        return { error: null, points: [...seen.values()], source: activeSource, usedFallback };
+        return { error: null, points: [...seen.values()] };
+    }
+
+    // Query the picked local source; fall back to statewide on ERROR **or on
+    // ZERO points** (2026-07-21: 13 counties of bbox rectangles inevitably
+    // overlap neighbors — a mispick must degrade to statewide, not to a silent
+    // empty scan). Returns { error, points, source, usedFallback }.
+    async function queryGisAlongSegments(segInfos) {
+        const mid = samplePointsAlong(segInfos[0].line)[0];
+        const requestedLocal = pickLocalSource(mid[0], mid[1]);
+        const radius = hnQueryRadiusM();
+        if (requestedLocal) {
+            const local = await querySamplesWithSource(segInfos, requestedLocal, radius);
+            if (!local.error && local.points.length) {
+                return { error: null, points: local.points, source: requestedLocal, usedFallback: false };
+            }
+            console.warn(`${HN_LOG} ${requestedLocal.name} ${local.error ? `failed (${local.error})` : 'returned no points'} → statewide fallback.`);
+            const state = await querySamplesWithSource(segInfos, STATEWIDE_SOURCE, radius);
+            return { error: state.error, points: state.points, source: STATEWIDE_SOURCE, usedFallback: true };
+        }
+        const state = await querySamplesWithSource(segInfos, STATEWIDE_SOURCE, radius);
+        return { error: state.error, points: state.points, source: STATEWIDE_SOURCE, usedFallback: false };
     }
 
     // ---- scan ----------------------------------------------------------------
