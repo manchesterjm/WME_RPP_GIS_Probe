@@ -46,6 +46,15 @@ const cases = [
     ['US-85', 'US HIGHWAY 85', true],
     ['I-25', 'INTERSTATE 25', true],
     ['CR-59A', 'COUNTY ROAD 59A', true],             // letter-suffixed route number
+    // Route concurrencies + ambiguous HIGHWAY (2026-07-21, Mesa US-6/US-50):
+    ['US-50', 'HIGHWAY 6 AND 50', true],             // concurrency matches either member
+    ['US-6', 'HWY 6 AND 50', true],
+    ['US-50', 'HIGHWAY 50', true],                   // bare HIGHWAY wildcards against US
+    ['SH-105', 'HIGHWAY 105', true],                 // …and against SH
+    ['US-50', 'US 6 AND 50', true],
+    ['SH-340', 'HIGHWAY 6 AND 50', false],           // number not in the concurrency
+    ['CR-50', 'HIGHWAY 50', false],                  // HWY wildcard never covers county roads
+    ['US-50', 'Main St', false],                     // route vs real name never match
     ['Smith-Jones Rd', 'SMITH JONES RD', true],      // hyphen = space in real names too
     ['Talon Loop', 'TALON LP', true],                // WME uses both Loop and Lp
     ['Talon Lp', 'TALON LOOP', true],

@@ -545,22 +545,41 @@
     // Known gap: directional-prefixed county roads ("E County Road 30") pass
     // through unrouted.  Order matters: CR forms (incl. "CO RD") before the SH
     // catch-all that claims bare CO/HWY.
+    // Bare HIGHWAY/HWY is system-AMBIGUOUS (could be a US or state route) —
+    // canonical 'HWY n' acts as a wildcard against SH/US in parseRoute below
+    // (v.22: GIS "HIGHWAY 6 AND 50" vs WME "US-50" — the Mesa County US-6/US-50
+    // concurrency; the old HWY→SH mapping made "HIGHWAY 50" conflict with US-50).
     const ROUTE_FORMS = [
+        [/^(?:US (?:HIGHWAY|HWY|ROUTE)|U S HIGHWAY|US|HIGHWAY|HWY) 0*(\d+[A-Z]?) (?:AND|&) 0*(\d+[A-Z]?)$/, 'HWY', 2],
         [/^(?:WELD COUNTY (?:ROAD|RD)|WELD CR|WCR) 0*(\d+[A-Z]?)$/, 'CR'],
         [/^(?:COUNTY (?:ROAD|RD)|CNTY RD|CO RD|CR) 0*(\d+[A-Z]?)$/, 'CR'],
         [/^(?:US (?:HIGHWAY|HWY|ROUTE)|U S HIGHWAY|US) 0*(\d+[A-Z]?)$/, 'US'],
         [/^(?:INTERSTATE|IH|I) 0*(\d+[A-Z]?)$/, 'I'],
-        [/^(?:STATE (?:HIGHWAY|HWY|ROUTE)|ST HWY|SR|SH|COLORADO|COLO|CO|HIGHWAY|HWY) 0*(\d+[A-Z]?)$/, 'SH'],
+        [/^(?:STATE (?:HIGHWAY|HWY|ROUTE)|ST HWY|SR|SH|COLORADO|COLO|CO) 0*(\d+[A-Z]?)$/, 'SH'],
+        [/^(?:HIGHWAY|HWY) 0*(\d+[A-Z]?)$/, 'HWY'],
     ];
 
     function canonicalizeRoute(cleaned) {
-        for (const [re, prefix] of ROUTE_FORMS) {
+        for (const [re, prefix, two] of ROUTE_FORMS) {
             const m = cleaned.match(re);
             if (m) {
-                return `${prefix} ${m[1]}`;
+                return two ? `${prefix} ${m[1]}&${m[2]}` : `${prefix} ${m[1]}`;
             }
         }
         return null;
+    }
+
+    // {sys, nums} for a canonical route string ('US 50', 'HWY 6&50'), else null.
+    function parseRoute(n) {
+        const m = n.match(/^(CR|SH|US|I|HWY) (\d+[A-Z]?)(?:&(\d+[A-Z]?))?$/);
+        if (!m) {
+            return null;
+        }
+        const nums = new Set([m[2]]);
+        if (m[3]) {
+            nums.add(m[3]);
+        }
+        return { sys: m[1], nums };
     }
 
     // Cardinal directionals (2026-07-21): TRANSLATE spelled-out forms at the
@@ -653,6 +672,21 @@
     function streetsMatch(a, b) {
         const na = normalizeStreet(a);
         const nb = normalizeStreet(b);
+        // Routes match on SYSTEM + NUMBER-SET intersection: a concurrency
+        // ("HWY 6&50") matches either member route; the ambiguous HWY system
+        // wildcards against SH/US (never CR/I). Route vs non-route never match.
+        const ra = parseRoute(na);
+        const rb = parseRoute(nb);
+        if (ra || rb) {
+            if (!ra || !rb) {
+                return false;
+            }
+            const wildcardOk = (x, y) => x.sys === 'HWY' && (y.sys === 'SH' || y.sys === 'US' || y.sys === 'HWY');
+            if (ra.sys !== rb.sys && !wildcardOk(ra, rb) && !wildcardOk(rb, ra)) {
+                return false;
+            }
+            return [...ra.nums].some((n) => rb.nums.has(n));
+        }
         const da = dirOf(na);
         const db = dirOf(nb);
         if (da && db && da !== db) {
