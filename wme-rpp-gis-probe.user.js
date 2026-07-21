@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.21.1';
+    const SCRIPT_VERSION = '2026.07.21.2';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -162,12 +162,34 @@
         selectionPollMs: 300,   // WME fires no reachable selection event (Segment City Tool finding) → poll
     };
 
-    // Street-type normalization so "Springnite Drive" (WME) matches "SPRINGNITE DR" (GIS).
+    // Street-type normalization so "Springnite Drive" (WME) matches "SPRINGNITE DR"
+    // (GIS) — and "Way" matches "Wy", "View" matches "Vw", etc. Every VARIANT maps
+    // to one canonical form (USPS Pub 28 App C1 abbreviations); tokens equal to a
+    // canonical form pass through untouched. Deliberately NO identity entries
+    // (PARK→PARK etc.) — they'd only widen streetCore's trailing-type stripping.
+    // 2026-07-21: expanded from 19 full-word pairs after "Way" vs GIS "Wy" broke
+    // the HN Filler (and "View"/"Vw" would have too — WME uses both forms).
     const STREET_TYPES = {
-        DRIVE: 'DR', STREET: 'ST', AVENUE: 'AVE', ROAD: 'RD', COURT: 'CT', LANE: 'LN',
-        CIRCLE: 'CIR', BOULEVARD: 'BLVD', PLACE: 'PL', TRAIL: 'TRL', PARKWAY: 'PKWY',
-        TERRACE: 'TER', POINT: 'PT', HEIGHTS: 'HTS', SQUARE: 'SQ', HIGHWAY: 'HWY',
-        CRESCENT: 'CRES', GROVE: 'GRV', VIEW: 'VW',
+        DRIVE: 'DR', DRV: 'DR', STREET: 'ST', STR: 'ST', AVENUE: 'AVE', AV: 'AVE', AVEN: 'AVE',
+        ROAD: 'RD', COURT: 'CT', CRT: 'CT', LANE: 'LN', CIRCLE: 'CIR', CIRC: 'CIR',
+        BOULEVARD: 'BLVD', BOUL: 'BLVD', PLACE: 'PL', TRAIL: 'TRL', TR: 'TRL',
+        PARKWAY: 'PKWY', PKY: 'PKWY', TERRACE: 'TER', TERR: 'TER', POINT: 'PT', POINTE: 'PT',
+        HEIGHTS: 'HTS', SQUARE: 'SQ', SQR: 'SQ', HIGHWAY: 'HWY', HIWAY: 'HWY',
+        CRESCENT: 'CRES', GROVE: 'GRV', VIEW: 'VW', WY: 'WAY',
+        ALLEY: 'ALY', BEND: 'BND', BLUFF: 'BLF', BLUFFS: 'BLFS', BRANCH: 'BR', BRIDGE: 'BRG',
+        BROOK: 'BRK', CANYON: 'CYN', CAPE: 'CPE', CENTER: 'CTR', CENTRE: 'CTR',
+        CLIFF: 'CLF', CLIFFS: 'CLFS', COMMON: 'CMN', COMMONS: 'CMNS', CORNER: 'COR',
+        CORNERS: 'CORS', COURSE: 'CRSE', COVE: 'CV', CREEK: 'CRK', CREST: 'CRST',
+        CROSSING: 'XING', DALE: 'DL', ESTATE: 'EST', ESTATES: 'ESTS', EXPRESSWAY: 'EXPY',
+        EXTENSION: 'EXT', FALLS: 'FLS', FIELD: 'FLD', FIELDS: 'FLDS', FOREST: 'FRST',
+        FORK: 'FRK', FREEWAY: 'FWY', GARDEN: 'GDN', GARDENS: 'GDNS', GATEWAY: 'GTWY',
+        GLEN: 'GLN', GREEN: 'GRN', HARBOR: 'HBR', HILL: 'HL', HILLS: 'HLS', HOLLOW: 'HOLW',
+        ISLAND: 'IS', JUNCTION: 'JCT', KNOLL: 'KNL', KNOLLS: 'KNLS', LAKE: 'LK',
+        LANDING: 'LNDG', MANOR: 'MNR', MEADOW: 'MDW', MEADOWS: 'MDWS', MILL: 'ML',
+        MOUNT: 'MT', MOUNTAIN: 'MTN', ORCHARD: 'ORCH', PLAZA: 'PLZ', RANCH: 'RNCH',
+        RIDGE: 'RDG', RIVER: 'RIV', SHORE: 'SHR', SHORES: 'SHRS', SPRING: 'SPG',
+        SPRINGS: 'SPGS', SUMMIT: 'SMT', TRACE: 'TRCE', TUNNEL: 'TUNL', TURNPIKE: 'TPKE',
+        VALLEY: 'VLY', VILLAGE: 'VLG', VISTA: 'VIS', VSTA: 'VIS',
     };
 
     let wmeSdk = null;
@@ -279,17 +301,37 @@
         return cleaned.split(' ').map((tok) => STREET_TYPES[tok] || tok).join(' ');
     }
 
+    const TYPE_ABBREVS = new Set(Object.values(STREET_TYPES));
+
+    // The trailing street-type token (canonical), or null if the name ends bare.
+    function trailingType(name) {
+        const tokens = normalizeStreet(name).split(' ');
+        return (tokens.length > 1 && TYPE_ABBREVS.has(tokens[tokens.length - 1]))
+            ? tokens[tokens.length - 1] : null;
+    }
+
     function streetCore(name) {
         const tokens = normalizeStreet(name).split(' ');
-        const typeAbbrevs = new Set(Object.values(STREET_TYPES));
-        if (tokens.length > 1 && typeAbbrevs.has(tokens[tokens.length - 1])) {
+        if (tokens.length > 1 && TYPE_ABBREVS.has(tokens[tokens.length - 1])) {
             tokens.pop();
         }
         return tokens.join(' ');
     }
 
+    // Exact normalized match, OR core-name match — but a MISSING type is benign
+    // (GIS sources sometimes omit it) while two CONFLICTING types mean different
+    // streets ("Sage Brush Way" ≠ "Sage Brush Trl"; tightened 2026-07-21, the old
+    // unconditional core fallback equated those).
     function streetsMatch(a, b) {
-        return normalizeStreet(a) === normalizeStreet(b) || streetCore(a) === streetCore(b);
+        if (normalizeStreet(a) === normalizeStreet(b)) {
+            return true;
+        }
+        const ta = trailingType(a);
+        const tb = trailingType(b);
+        if (ta && tb && ta !== tb) {
+            return false;
+        }
+        return streetCore(a) === streetCore(b);
     }
 
     // ---- GIS query ------------------------------------------------------------
