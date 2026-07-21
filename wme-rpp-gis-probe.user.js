@@ -140,7 +140,8 @@
             fields: (a) => ({
                 hn: a.ADDRESS_NUMBER,
                 street: joinStreet([
-                    a.STREET_PREDIRECTIONAL, a.STREET_PRETYPE, a.STREET_NAME, a.STREET_POSTTYPE, a.STREET_POSTDIRECTIONAL,
+                    a.STREET_PREDIRECTIONAL, a.STREET_PRETYPE, a.STREET_NAME,
+                    a.STREET_POSTTYPE, a.STREET_POSTDIRECTIONAL,
                 ]),
                 address: a.FULL_ADDRESS || '',
                 city: a.CITY || '',
