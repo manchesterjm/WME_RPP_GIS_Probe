@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.21.21';
+    const SCRIPT_VERSION = '2026.07.21.22';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -871,8 +871,9 @@
 
         const tally = {};
         const misplaced = [];   // → result rows with a Snap button
-        const review = [];      // wrong-hn / hn-diff-street / no-match — report-only rows (v.21:
-                                //   these were console-only; a found problem showed an empty tab)
+        // wrong-hn / hn-diff-street / no-match → report-only rows (v.21: these
+        // were console-only; a found problem showed an empty tab).
+        const review = [];
         for (let idx = 0; idx < rpps.length; idx++) {
             const rpp = rpps[idx];
             setProbeStatus(`⏳ Scanning ${idx + 1}/${rpps.length} via ${sourceHost(activeSource)}…`, '#06c');
