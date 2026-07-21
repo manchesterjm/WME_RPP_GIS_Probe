@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.21.19';
+    const SCRIPT_VERSION = '2026.07.21.20';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -1226,11 +1226,16 @@
     }
 
     // All samples along every selected segment against ONE source; merge +
-    // dedupe by (street, hn).
-    async function querySamplesWithSource(segInfos, source, radius) {
+    // dedupe by (street, hn). Samples outside the view are skipped (v.20: a
+    // single rural segment can run for MILES with one end on screen — the
+    // visible-segment test alone still walked its whole length).
+    async function querySamplesWithSource(segInfos, source, radius, scanBbox) {
         const seen = new Map();   // key → point
         for (const si of segInfos) {
             for (const [lon, lat] of samplePointsAlong(si.line)) {
+                if (scanBbox && !coordInBbox(lon, lat, scanBbox)) {
+                    continue;
+                }
                 const { error, points } = await queryOneSource(source, lon, lat, radius);
                 if (error) {
                     return { error, points: [] };
@@ -1253,20 +1258,20 @@
     // ZERO points** (2026-07-21: 13 counties of bbox rectangles inevitably
     // overlap neighbors — a mispick must degrade to statewide, not to a silent
     // empty scan). Returns { error, points, source, usedFallback }.
-    async function queryGisAlongSegments(segInfos) {
+    async function queryGisAlongSegments(segInfos, scanBbox) {
         const mid = samplePointsAlong(segInfos[0].line)[0];
         const requestedLocal = pickLocalSource(mid[0], mid[1]);
         const radius = hnQueryRadiusM();
         if (requestedLocal) {
-            const local = await querySamplesWithSource(segInfos, requestedLocal, radius);
+            const local = await querySamplesWithSource(segInfos, requestedLocal, radius, scanBbox);
             if (!local.error && local.points.length) {
                 return { error: null, points: local.points, source: requestedLocal, usedFallback: false };
             }
             console.warn(`${HN_LOG} ${requestedLocal.name} ${local.error ? `failed (${local.error})` : 'returned no points'} → statewide fallback.`);
-            const state = await querySamplesWithSource(segInfos, STATEWIDE_SOURCE, radius);
+            const state = await querySamplesWithSource(segInfos, STATEWIDE_SOURCE, radius, scanBbox);
             return { error: state.error, points: state.points, source: STATEWIDE_SOURCE, usedFallback: true };
         }
-        const state = await querySamplesWithSource(segInfos, STATEWIDE_SOURCE, radius);
+        const state = await querySamplesWithSource(segInfos, STATEWIDE_SOURCE, radius, scanBbox);
         return { error: state.error, points: state.points, source: STATEWIDE_SOURCE, usedFallback: false };
     }
 
@@ -1479,7 +1484,7 @@
             const plrSegs = loadedPlrSegments(viewBbox);
 
             setHnStatus('⏳ Querying GIS address points along the selection…', '#06c');
-            const gis = await queryGisAlongSegments(segInfos);
+            const gis = await queryGisAlongSegments(segInfos, scanBbox);
             if (gis.error) {
                 setHnScanning(false);
                 setHnStatus(`✗ GIS query failed: ${gis.error}`, '#c00');
@@ -1493,7 +1498,15 @@
             let rppCoveredCount = 0;
             const corridor = hnCorridorM();
             const corridorMin = hnCorridorMinM();
+            let offScreen = 0;
             for (const p of gis.points) {
+                // v.20: the SCREEN is a hard wall — the band means "distance from
+                // the road", never "distance off my viewport". A wide band (1000m)
+                // zoomed-in otherwise proposes points far outside the view.
+                if (scanBbox && !coordInBbox(p.lon, p.lat, scanBbox)) {
+                    offScreen++;
+                    continue;
+                }
                 const lineDist = Math.min(...segInfos.map((si) => metersToLine(p.lon, p.lat, si.line)));
                 if (lineDist > corridor) {
                     continue;   // another block/parallel street — not this road's frontage
@@ -1572,6 +1585,7 @@
             const tallyLine = `GIS: ${gis.points.length} point(s) fetched, ${onStreet} on-street (${bandDesc}) · ${presentCount} already mapped`
                 + `${rppCoveredCount ? ` · ${rppCoveredCount} covered by RPPs` : ''}`
                 + ` · <b>${missing.length} missing</b> · ${mismatch.length} street-mismatch`
+                + `${offScreen ? ` · ${offScreen} off-screen (pan/zoom out to reach them)` : ''}`
                 + `<br><span style="color:#235;">🗺️ ${srcDesc}</span>${notes ? `<br><span style="color:#888;">${notes}</span>` : ''}`;
             if (onStreet === 0) {
                 // "Nothing in GIS" must never read as "all mapped" — new construction
