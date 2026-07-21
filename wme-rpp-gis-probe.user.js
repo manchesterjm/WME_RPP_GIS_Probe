@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.21.7';
+    const SCRIPT_VERSION = '2026.07.21.8';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -178,7 +178,7 @@
         BOULEVARD: 'BLVD', BOUL: 'BLVD', PLACE: 'PL', TRAIL: 'TRL', TR: 'TRL',
         PARKWAY: 'PKWY', PKY: 'PKWY', TERRACE: 'TER', TERR: 'TER', POINT: 'PT', POINTE: 'PT',
         HEIGHTS: 'HTS', SQUARE: 'SQ', SQR: 'SQ', HIGHWAY: 'HWY', HIWAY: 'HWY',
-        CRESCENT: 'CRES', GROVE: 'GRV', VIEW: 'VW', WY: 'WAY',
+        CRESCENT: 'CRES', GROVE: 'GRV', VIEW: 'VW', WY: 'WAY', LP: 'LOOP',
         ALLEY: 'ALY', BEND: 'BND', BLUFF: 'BLF', BLUFFS: 'BLFS', BRANCH: 'BR', BRIDGE: 'BRG',
         BROOK: 'BRK', CANYON: 'CYN', CAPE: 'CPE', CENTER: 'CTR', CENTRE: 'CTR',
         CLIFF: 'CLF', CLIFFS: 'CLFS', COMMON: 'CMN', COMMONS: 'CMNS', CORNER: 'COR',

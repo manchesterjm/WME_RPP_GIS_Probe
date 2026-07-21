@@ -47,6 +47,10 @@ const cases = [
     ['I-25', 'INTERSTATE 25', true],
     ['CR-59A', 'COUNTY ROAD 59A', true],             // letter-suffixed route number
     ['Smith-Jones Rd', 'SMITH JONES RD', true],      // hyphen = space in real names too
+    ['Talon Loop', 'TALON LP', true],                // WME uses both Loop and Lp
+    ['Talon Lp', 'TALON LOOP', true],
+    ['Talon Loop', 'TALON', true],                   // GIS bare form, one-sided strip
+    ['Talon Loop', 'TALON TRL', false],              // conflicting types still refuse
     ['Highway View Dr', 'HIGHWAY VIEW DR', true],    // route words inside a real name: untouched
     // Must REFUSE:
     ['E Woodmen Rd', 'WOODMEN RD', false],           // missing directional = real flag (intentional gap)
