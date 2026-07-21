@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.21.8';
+    const SCRIPT_VERSION = '2026.07.21.9';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -160,7 +160,8 @@
         mismatchCorridorM: 55,  // street-MISMATCH reporting stays tight: another street 100m out is normal, not a discrepancy
         sampleStepM: 80,        // spacing of GIS query samples along the segment
         maxSegmentsPerScan: 10, // selection cap per scan
-        maxAddsPerScan: 50,     // hard cap on Add clicks per scan (guardrail)
+        saveQueueLimit: 50,     // WME only saves 50 queued edits — gate on the LIVE unsaved count
+        //   (a per-scan cap resets on rescan and can overfill the queue; Josh hit this)
         minZoom: 17,            // same rationale as the probe: model not reliably loaded below this
         selectionPollMs: 300,   // WME fires no reachable selection event (Segment City Tool finding) → poll
     };
@@ -778,7 +779,6 @@
     let hnAddAllRef = null;
 
     let hnSelectionSummary = '';      // last rendered selection line (skip redundant DOM writes)
-    let hnAddsThisScan = 0;
     const hnSessionAdded = new Set(); // "street|hn" keys added this session (fetch won't see unsaved adds)
     let hnPendingRows = [];           // current scan's missing rows — {c, span, btn, done}; Add-all walks this
 
@@ -960,7 +960,7 @@
     }
 
     async function hnScanSelected() {
-        hnAddsThisScan = 0;
+
         if (!wmeSdk) {
             setHnStatus('✗ WME SDK unavailable — cannot scan.', '#c00');
             return;
@@ -1124,8 +1124,8 @@
         if (!wmeSdk) {
             return { ok: false, err: 'SDK unavailable' };
         }
-        if (hnAddsThisScan >= HN_CONFIG.maxAddsPerScan) {
-            return { ok: false, err: `per-scan cap (${HN_CONFIG.maxAddsPerScan}) reached — rescan to continue` };
+        if (wmeSdk.Editing.getUnsavedChangesCount() >= HN_CONFIG.saveQueueLimit) {
+            return { ok: false, err: `WME's save queue is full (${HN_CONFIG.saveQueueLimit}) — SAVE in WME, then rescan` };
         }
         if (!wmeSdk.DataModel.Segments.getById({ segmentId: c.attachSegId })) {
             return { ok: false, err: 'target segment no longer loaded — rescan' };
@@ -1143,7 +1143,7 @@
         if (wmeSdk.Editing.getUnsavedChangesCount() <= before) {
             return { ok: false, err: 'no edit registered — check the console' };
         }
-        hnAddsThisScan++;
+
         hnSessionAdded.add(hnKey(c.street, c.hn));
         console.log(`${HN_LOG} added HN ${c.hn} (${c.street}) @ (${c.lon.toFixed(6)}, ${c.lat.toFixed(6)}) → segment ${c.attachSegId} [${c.attachDistM.toFixed(0)}m] — UNSAVED until you save in WME.`);
         return { ok: true };
@@ -1187,7 +1187,7 @@
     // Add-all (enabled 2026-07-21 after the per-row flow proved out in the
     // field): walks the current scan's rows through the SAME reviewed-add path.
     // Everything stays unsaved until Josh saves in WME — the bulk is still
-    // reviewable there, and the per-scan cap applies.
+    // reviewable there, and the save-queue gate applies per add.
     function hnAddAll() {
         let added = 0;
         let failed = 0;
@@ -1200,7 +1200,7 @@
                 added++;
             } else {
                 failed++;
-                if (/per-scan cap/.test(res.err || '')) {
+                if (/save queue is full/.test(res.err || '')) {
                     break;
                 }
             }
