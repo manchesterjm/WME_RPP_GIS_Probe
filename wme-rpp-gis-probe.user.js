@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.21.0';
+    const SCRIPT_VERSION = '2026.07.21.1';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -93,12 +93,17 @@
         {
             id: 'douglas',
             name: 'Douglas County',
-            // Same Esri-hosted FeatureServer WME GIS Layers uses (the county's own
-            // apps.douglas.co.us server 502s; this Esri mirror is reliable). Note
-            // STREET_NAME_FULL is the full ADDRESS ("230 THIRD ST"), so build the
-            // bare street from the split fields instead.
-            url: 'https://services.arcgis.com/seTexOicoRXDvRsJ/ArcGIS/rest/services/Address/FeatureServer/0/query',
-            bbox: [-105.33, 39.12, -104.55, 39.57], // Douglas County extent
+            // ⚠️ 2026-07-21: the old Address/FeatureServer/0 (the one the WME GIS
+            // Layers sheet still lists) now has ZERO layers — every query 400s
+            // "Invalid URL". Replaced with the org's AddressSearch view: same
+            // split-field schema (verified live), statuses only RECORDED/RELEASED.
+            // STREET_NAME_FULL is still the full ADDRESS ("230 THIRD ST"), so build
+            // the bare street from the split fields instead.
+            url: 'https://services.arcgis.com/seTexOicoRXDvRsJ/ArcGIS/rest/services/AddressSearch/FeatureServer/0/query',
+            // East edge = the real Douglas/Elbert county line (~-104.662), NOT the
+            // old -104.55: the rectangle was claiming Elbert points (Loblolly Pine
+            // Cir 2026-07-21) and mispicking Douglas for them.
+            bbox: [-105.33, 39.12, -104.662, 39.57],
             fields: (a) => ({
                 hn: a.ADDRESS_NUMBER,
                 street: joinStreet([
@@ -145,9 +150,11 @@
     // 🔢 HN Filler tunables (separate from the probe's — different geometry problem:
     // corridor along a street line, not a radius around a point).
     const HN_CONFIG = {
-        corridorM: 55,          // GIS point must be within this of a SELECTED segment's line to count
+        corridorM: 150,         // on-street match corridor — rural lots set houses 60-120m back
+                                //   (Loblolly Pine Cir, Elbert Co 2026-07-21: real points sat 57-111m off the line)
+        mismatchCorridorM: 55,  // street-MISMATCH reporting stays tight: another street 100m out is normal, not a discrepancy
         sampleStepM: 80,        // spacing of GIS query samples along the segment
-        queryRadiusM: 75,       // per-sample GIS radius (covers half a step along + the corridor across)
+        queryRadiusM: 165,      // per-sample GIS radius (covers half a step along + the corridor across)
         maxSegmentsPerScan: 10, // selection cap per scan
         maxAddsPerScan: 50,     // hard cap on Add clicks per scan (guardrail)
         minZoom: 17,            // same rationale as the probe: model not reliably loaded below this
@@ -922,13 +929,17 @@
             const mismatch = [];
             let presentCount = 0;
             for (const p of gis.points) {
-                const inCorridor = segInfos.some((si) => metersToLine(p.lon, p.lat, si.line) <= HN_CONFIG.corridorM);
-                if (!inCorridor) {
+                const lineDist = Math.min(...segInfos.map((si) => metersToLine(p.lon, p.lat, si.line)));
+                if (lineDist > HN_CONFIG.corridorM) {
                     continue;   // another block/parallel street — not this road's frontage
                 }
                 if (!segInfos.some((si) => streetsMatch(p.street, si.streetName))) {
-                    mismatch.push(p);
-                    continue;   // report-only: GIS says a different street fronts here
+                    // Report-only, and only when it's AT the curb (a different street
+                    // 100m out is normal geography, not a data discrepancy).
+                    if (lineDist <= HN_CONFIG.mismatchCorridorM) {
+                        mismatch.push(p);
+                    }
+                    continue;
                 }
                 const norm = normHn(p.hn);
                 if (existingNums.has(norm) || hnSessionAdded.has(hnKey(p.street, p.hn))) {
@@ -970,10 +981,18 @@
                 capped ? `first ${HN_CONFIG.maxSegmentsPerScan} of ${ids.length} selected segments` : '',
                 skipped.length ? `${skipped.length} segment(s) skipped (street not loaded)` : '',
             ].filter(Boolean).join(' · ');
-            const tallyLine = `${presentCount} already mapped · <b>${missing.length} missing</b> · ${mismatch.length} street-mismatch`
+            const onStreet = presentCount + missing.length;
+            const tallyLine = `GIS: ${gis.points.length} point(s) fetched, ${onStreet} on-street · ${presentCount} already mapped`
+                + ` · <b>${missing.length} missing</b> · ${mismatch.length} street-mismatch`
                 + `<br><span style="color:#235;">🗺️ ${srcDesc}</span>${notes ? `<br><span style="color:#888;">${notes}</span>` : ''}`;
-            if (missing.length === 0) {
-                setHnStatus(`✅ Done ${at} — <b>${streets}</b>: every GIS house number in the corridor is already mapped.<br>${tallyLine}`, '#0a7');
+            if (onStreet === 0) {
+                // "Nothing in GIS" must never read as "all mapped" — new construction
+                // can lag the source (that's this tool's whole use case).
+                setHnStatus(`⚠️ Done ${at} — <b>${streets}</b>: the GIS source has NO on-street address points along this`
+                    + ` selection. That means no data to compare — NOT that the map is complete (new construction may`
+                    + ` lag the source).<br>${tallyLine}`, '#b26a00');
+            } else if (missing.length === 0) {
+                setHnStatus(`✅ Done ${at} — <b>${streets}</b>: all ${onStreet} GIS house number(s) here are already mapped.<br>${tallyLine}`, '#0a7');
             } else {
                 setHnStatus(`⚠️ Done ${at} — <b>${streets}</b>: ${missing.length} house number(s) missing. Review below.<br>${tallyLine}`, '#b26a00');
             }
