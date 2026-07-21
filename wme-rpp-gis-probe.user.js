@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.21.17';
+    const SCRIPT_VERSION = '2026.07.21.18';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -1431,9 +1431,18 @@
             }
 
             const streetIds = new Set(segInfos.map((s) => s.primaryStreetId).filter((x) => x != null));
+            // v.18 split: KNOWLEDGE is model-wide, WRITES are view-only.
+            // familyAll feeds the dedupe fetch (clipping it caused real
+            // "House number already exists" save errors — numbers on loaded
+            // same-street segments just off-screen were re-proposed); attach
+            // targets come only from the visible subset, so the script never
+            // EDITS a segment outside the active view.
             const viewBbox = paddedViewBbox();
-            const family = sameStreetFamily(streetIds, viewBbox);
-            const familyIds = new Set(family.map((f) => f.id));
+            const familyAll = sameStreetFamily(streetIds, null);
+            const family = viewBbox
+                ? familyAll.filter((f) => lineTouchesBbox(f.line.geometry.coordinates, viewBbox))
+                : familyAll;
+            const familyIds = new Set(familyAll.map((f) => f.id));
             setHnStatus(`⏳ Fetching existing house numbers for ${familyIds.size} same-street segment(s)…`, '#06c');
 
             // Existing numbers = server state (fetch) + any unsaved local INSERTs
