@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.21.11';
+    const SCRIPT_VERSION = '2026.07.21.12';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -1162,6 +1162,45 @@
 
     // ---- scan ----------------------------------------------------------------
 
+    // Loaded unnamed PLR segments (roadType 20, no primary street) — the
+    // "houses on an unnamed parking-lot-road offshoot" detector (2026-07-21).
+    // When one of these sits closer to a GIS point than the named street does,
+    // the CO convention is an RPP addressed to the parent road (stop point then
+    // dragged onto the PLR by hand — no SDK write path for navigationPoints).
+    function loadedPlrSegments() {
+        const plrs = [];
+        const segObjs = (W && W.model && W.model.segments && W.model.segments.objects) ? W.model.segments.objects : {};
+        for (const sid in segObjs) {
+            const attrs = segObjs[sid].attributes || {};
+            if (attrs.roadType !== 20 || (attrs.primaryStreetID ?? attrs.primaryStreetId) != null) {
+                continue;
+            }
+            const seg = wmeSdk.DataModel.Segments.getById({ segmentId: attrs.id });
+            if (seg && seg.geometry && seg.geometry.coordinates && seg.geometry.coordinates.length >= 2) {
+                plrs.push({ id: attrs.id, line: turf.lineString(seg.geometry.coordinates) });
+            }
+        }
+        return plrs;
+    }
+
+    // Existing RPP house numbers on the selection's streets — venues, not
+    // segment HNs, so fetchHouseNumbers never sees them (PLR-workflow areas
+    // use RPPs as the norm; without this they'd re-propose forever).
+    function existingRppNumbers(streetIds) {
+        const nums = new Set();
+        const venueObjs = (W && W.model && W.model.venues && W.model.venues.objects) ? W.model.venues.objects : {};
+        for (const vid in venueObjs) {
+            const attrs = venueObjs[vid].attributes || {};
+            if (!attrs.categories || !attrs.categories.includes('RESIDENCE_HOME')) {
+                continue;
+            }
+            if (streetIds.has(attrs.streetID) && attrs.houseNumber != null) {
+                nums.add(normHn(attrs.houseNumber));
+            }
+        }
+        return nums;
+    }
+
     // Loaded segments sharing a primary street with the selection — the HN
     // dedupe universe AND the snap-target candidates (numbers near a segment end
     // may belong on the neighboring same-street segment).
@@ -1251,6 +1290,10 @@
                     existingNums.add(normHn(a.number));
                 }
             }
+            for (const n of existingRppNumbers(streetIds)) {
+                existingNums.add(n);
+            }
+            const plrSegs = loadedPlrSegments();
 
             setHnStatus('⏳ Querying GIS address points along the selection…', '#06c');
             const gis = await queryGisAlongSegments(segInfos);
@@ -1295,6 +1338,16 @@
                 if (!best || best.d > corridor) {
                     continue;
                 }
+                // Unnamed-PLR proximity: when a PLR offshoot sits closer than the
+                // named street, this is likely the RPP-not-segment-HN case.
+                let plr = null;
+                for (const ps of plrSegs) {
+                    const d = metersToLine(p.lon, p.lat, ps.line);
+                    if (d < best.d && d <= corridor && (!plr || d < plr.d)) {
+                        plr = { id: ps.id, d };
+                    }
+                }
+                const matchedSeg = segInfos.find((si) => streetsMatch(p.street, si.streetName));
                 missing.push({
                     hn: String(p.hn).trim(),
                     street: p.street,
@@ -1303,6 +1356,9 @@
                     lat: p.lat,
                     attachSegId: best.id,
                     attachDistM: best.d,
+                    streetId: matchedSeg ? matchedSeg.primaryStreetId : null,
+                    plrSegId: plr ? plr.id : null,
+                    plrDistM: plr ? plr.d : null,
                 });
             }
             missing.sort((a, b) => (parseInt(a.hn, 10) || 0) - (parseInt(b.hn, 10) || 0));
@@ -1372,6 +1428,40 @@
         return { ok: true };
     }
 
+    // Create an RPP (residential venue) addressed to the parent street at the
+    // GIS point — the unnamed-PLR-offshoot workflow (2026-07-21). The stop
+    // point CANNOT be set by script (SDK updateVenue has no navigationPoints
+    // arg) — Josh drags it onto the PLR in the venue editor afterwards.
+    function hnAddRppOne(c) {
+        if (!wmeSdk) {
+            return { ok: false, err: 'SDK unavailable' };
+        }
+        if (c.streetId == null) {
+            return { ok: false, err: 'no resolvable street id for this candidate' };
+        }
+        if (wmeSdk.Editing.getUnsavedChangesCount() >= HN_CONFIG.saveQueueLimit) {
+            return { ok: false, err: `WME's save queue is full (${HN_CONFIG.saveQueueLimit}) — SAVE in WME, then rescan` };
+        }
+        let venueId;
+        try {
+            venueId = wmeSdk.DataModel.Venues.addVenue({
+                category: 'RESIDENTIAL',
+                geometry: { type: 'Point', coordinates: [c.lon, c.lat] },
+            });
+            wmeSdk.DataModel.Venues.updateAddress({
+                venueId: String(venueId),
+                houseNumber: c.hn,
+                streetId: c.streetId,
+            });
+        } catch (e) {
+            return { ok: false, err: `${e.name || 'error'}: ${e.message}` };
+        }
+        hnSessionAdded.add(hnKey(c.street, c.hn));
+        console.log(`${HN_LOG} added RPP ${c.hn} (${c.street}) @ (${c.lon.toFixed(6)}, ${c.lat.toFixed(6)}) venue ${venueId}`
+            + `${c.plrSegId ? ` — PLR seg ${c.plrSegId} ${c.plrDistM.toFixed(0)}m away; drag the stop point onto it` : ''} — UNSAVED.`);
+        return { ok: true };
+    }
+
     // One reviewed add applied to a result row — shared by the row's own Add
     // button and the Add-all walk, so both paths look and behave identically.
     function applyAddToRow(entry) {
@@ -1392,7 +1482,8 @@
     }
 
     function makeHnMissingRow(c) {
-        const { row, span } = makeRow(`${c.hn} — ${c.street} (→ seg ${c.attachSegId}, ${c.attachDistM.toFixed(0)}m)`);
+        const plrNote = c.plrSegId ? ` · 🅿 PLR ${c.plrDistM.toFixed(0)}m` : '';
+        const { row, span } = makeRow(`${c.hn} — ${c.street} (→ seg ${c.attachSegId}, ${c.attachDistM.toFixed(0)}m)${plrNote}`);
         const btn = document.createElement('button');
         btn.textContent = 'Add';
         btn.title = 'Create this house number at the GIS point, snapped to the segment shown (unsaved until you save in WME)';
@@ -1402,8 +1493,30 @@
         btn.addEventListener('click', () => {
             applyAddToRow(entry);
         });
+        const rppBtn = document.createElement('button');
+        rppBtn.textContent = '+RPP';
+        rppBtn.title = 'Create a residential point place addressed to the parent street instead of a segment HN '
+            + '(the unnamed-PLR-offshoot workflow). Stop point must be dragged onto the PLR by hand afterwards.';
+        rppBtn.style.cssText = 'padding:3px 8px;background:#85f;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:11px;';
+        rppBtn.addEventListener('click', () => {
+            if (entry.done) {
+                return;
+            }
+            const res = hnAddRppOne(c);
+            if (res.ok) {
+                entry.done = true;
+                span.textContent = `✓ RPP added — ${c.hn} ${c.street}${c.plrSegId ? ' (drag its stop point onto the PLR)' : ''}`;
+                span.style.color = '#63c';
+                btn.remove();
+                rppBtn.remove();
+            } else {
+                span.textContent = `✗ ${c.hn}: ${res.err}`;
+                span.style.color = '#c00';
+            }
+        });
         row.appendChild(makeGoButton(c.lon, c.lat));
         row.appendChild(btn);
+        row.appendChild(rppBtn);
         return row;
     }
 
