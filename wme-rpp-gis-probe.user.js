@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.21.29';
+    const SCRIPT_VERSION = '2026.07.22.30';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -1456,21 +1456,48 @@
     // When one of these sits closer to a GIS point than the named street does,
     // the CO convention is an RPP addressed to the parent road (stop point then
     // dragged onto the PLR by hand — no SDK write path for navigationPoints).
-    function loadedPlrSegments(viewBbox) {
-        const plrs = [];
+    // ALL drawn (loaded) segments in view except the selection — the competitor
+    // set for the nearest-segment rule (v.30, Josh: a GIS point may only be
+    // added when its NEAREST drawn segment is a SELECTED one; a point nearer
+    // any other segment belongs to that road/stretch — selecting 20m of a
+    // fully-drawn mile must not inherit the whole mile's numbers — and points
+    // along undrawn continuations resolve to whatever IS drawn nearby).
+    // Unnamed PLRs (roadType 20, no street) are flagged, not competitors:
+    // nearest-PLR candidates stay proposable via the 🅿/+RPP workflow.
+    function loadedDrawnSegments(viewBbox, excludeIds) {
+        const out = [];
         const segObjs = (W && W.model && W.model.segments && W.model.segments.objects) ? W.model.segments.objects : {};
         for (const sid in segObjs) {
             const attrs = segObjs[sid].attributes || {};
-            if (attrs.roadType !== 20 || (attrs.primaryStreetID ?? attrs.primaryStreetId) != null) {
+            if (attrs.id == null || excludeIds.has(attrs.id)) {
                 continue;
             }
             const seg = wmeSdk.DataModel.Segments.getById({ segmentId: attrs.id });
-            if (seg && seg.geometry && seg.geometry.coordinates && seg.geometry.coordinates.length >= 2
-                && (!viewBbox || lineTouchesBbox(seg.geometry.coordinates, viewBbox))) {
-                plrs.push({ id: attrs.id, line: turf.lineString(seg.geometry.coordinates) });
+            if (!seg || !seg.geometry || !seg.geometry.coordinates || seg.geometry.coordinates.length < 2) {
+                continue;
             }
+            const coords = seg.geometry.coordinates;
+            if (viewBbox && !lineTouchesBbox(coords, viewBbox)) {
+                continue;
+            }
+            let minLon = Infinity;
+            let minLat = Infinity;
+            let maxLon = -Infinity;
+            let maxLat = -Infinity;
+            for (const c of coords) {
+                minLon = Math.min(minLon, c[0]);
+                maxLon = Math.max(maxLon, c[0]);
+                minLat = Math.min(minLat, c[1]);
+                maxLat = Math.max(maxLat, c[1]);
+            }
+            out.push({
+                id: attrs.id,
+                line: turf.lineString(coords),
+                bounds: [minLon, minLat, maxLon, maxLat],
+                barePlr: attrs.roadType === 20 && (attrs.primaryStreetID ?? attrs.primaryStreetId) == null,
+            });
         }
-        return plrs;
+        return out;
     }
 
     // Existing RPP house numbers covering the selection — venues, not segment
@@ -1658,9 +1685,6 @@
             // EDITS a segment outside the active view.
             const viewBbox = paddedViewBbox();
             const familyAll = sameStreetFamily(streetIds, null);
-            const family = viewBbox
-                ? familyAll.filter((f) => lineTouchesBbox(f.line.geometry.coordinates, viewBbox))
-                : familyAll;
             const familyIds = new Set(familyAll.map((f) => f.id));
             setHnStatus(`⏳ Fetching existing house numbers for ${familyIds.size} same-street segment(s)…`, '#06c');
 
@@ -1677,7 +1701,7 @@
                 }
             }
             const rppNums = existingRppNumbers(segInfos, hnCorridorM(), viewBbox);
-            const plrSegs = loadedPlrSegments(viewBbox);
+            const otherSegs = loadedDrawnSegments(viewBbox, new Set(scanIds));
 
             setHnStatus('⏳ Querying GIS address points along the selection…', '#06c');
             const gis = await queryGisAlongSegments(segInfos, scanBbox);
@@ -1692,6 +1716,7 @@
             const mismatch = [];
             let presentCount = 0;
             let rppCoveredCount = 0;
+            let nearerOtherCount = 0;
             const corridor = hnCorridorM();
             const corridorMin = hnCorridorMinM();
             let offScreen = 0;
@@ -1703,17 +1728,57 @@
                     offScreen++;
                     continue;
                 }
-                const lineDist = Math.min(...segInfos.map((si) => metersToLine(p.lon, p.lat, si.line)));
-                if (lineDist > corridor) {
+                let dSel = Infinity;
+                let selBestId = null;
+                for (const si of segInfos) {
+                    const d = metersToLine(p.lon, p.lat, si.line);
+                    if (d < dSel) {
+                        dSel = d;
+                        selBestId = si.id;
+                    }
+                }
+                if (dSel > corridor) {
                     continue;   // another block/parallel street — not this road's frontage
                 }
-                if (lineDist < corridorMin) {
+                if (dSel < corridorMin) {
                     continue;   // inside the band's near edge — user is targeting far-off houses
+                }
+                // v.30 NEAREST-SEGMENT rule (Josh): the point may only be added
+                // if the nearest DRAWN segment is a SELECTED one. Any other
+                // segment strictly nearer claims the point (its road/stretch) —
+                // except unnamed PLRs, which flag the 🅿/+RPP workflow instead.
+                // Bounds pre-check keeps this cheap: only segments whose box
+                // comes within dSel of the point can possibly beat dSel.
+                let plr = null;
+                let nearerOther = false;
+                const latPad = dSel / 110540;
+                const lonPad = dSel / (111320 * Math.cos((p.lat * Math.PI) / 180));
+                for (const os of otherSegs) {
+                    if (p.lon < os.bounds[0] - lonPad || p.lon > os.bounds[2] + lonPad
+                        || p.lat < os.bounds[1] - latPad || p.lat > os.bounds[3] + latPad) {
+                        continue;
+                    }
+                    const d = metersToLine(p.lon, p.lat, os.line);
+                    if (d >= dSel) {
+                        continue;
+                    }
+                    if (os.barePlr) {
+                        if (!plr || d < plr.d) {
+                            plr = { id: os.id, d };
+                        }
+                    } else {
+                        nearerOther = true;
+                        break;
+                    }
+                }
+                if (nearerOther) {
+                    nearerOtherCount++;   // belongs to an unselected/other road — never piles onto the selection
+                    continue;
                 }
                 if (!segInfos.some((si) => si.match(p.street))) {
                     // Report-only, and only when it's AT the curb (a different street
                     // 100m out is normal geography, not a data discrepancy).
-                    if (lineDist <= HN_CONFIG.mismatchCorridorM) {
+                    if (dSel <= HN_CONFIG.mismatchCorridorM) {
                         mismatch.push(p);
                     }
                     continue;
@@ -1727,27 +1792,6 @@
                     presentCount++;
                     continue;
                 }
-                // Snap target: the closest same-street segment (numbers near a
-                // segment end can belong on the neighbor).
-                let best = null;
-                for (const f of family) {
-                    const d = metersToLine(p.lon, p.lat, f.line);
-                    if (!best || d < best.d) {
-                        best = { id: f.id, d };
-                    }
-                }
-                if (!best || best.d > corridor) {
-                    continue;
-                }
-                // Unnamed-PLR proximity: when a PLR offshoot sits closer than the
-                // named street, this is likely the RPP-not-segment-HN case.
-                let plr = null;
-                for (const ps of plrSegs) {
-                    const d = metersToLine(p.lon, p.lat, ps.line);
-                    if (d < best.d && d <= corridor && (!plr || d < plr.d)) {
-                        plr = { id: ps.id, d };
-                    }
-                }
                 const matchedSeg = segInfos.find((si) => si.match(p.street));
                 missing.push({
                     hn: String(p.hn).trim(),
@@ -1755,8 +1799,8 @@
                     address: p.address || `${p.hn} ${p.street}`,
                     lon: p.lon,
                     lat: p.lat,
-                    attachSegId: best.id,
-                    attachDistM: best.d,
+                    attachSegId: selBestId,
+                    attachDistM: dSel,
                     streetId: matchedSeg ? matchedSeg.primaryStreetId : null,
                     plrSegId: plr ? plr.id : null,
                     plrDistM: plr ? plr.d : null,
@@ -1781,6 +1825,7 @@
             const tallyLine = `GIS: ${gis.points.length} point(s) fetched, ${onStreet} on-street (${bandDesc}) · ${presentCount} already mapped`
                 + `${rppCoveredCount ? ` · ${rppCoveredCount} covered by RPPs` : ''}`
                 + ` · <b>${missing.length} missing</b> · ${mismatch.length} street-mismatch`
+                + `${nearerOtherCount ? ` · ${nearerOtherCount} nearest to an UNSELECTED segment (select that stretch to work them)` : ''}`
                 + `${offScreen ? ` · ${offScreen} off-screen (pan/zoom out to reach them)` : ''}`
                 + `<br><span style="color:#235;">🗺️ ${srcDesc}</span>${notes ? `<br><span style="color:#888;">${notes}</span>` : ''}`;
             if (onStreet === 0) {
