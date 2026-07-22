@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.22.32';
+    const SCRIPT_VERSION = '2026.07.22.33';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -1575,6 +1575,30 @@
         return false;
     }
 
+    // Suggested WME name for a mis-typed segment: keep the segment's own text
+    // and casing, swap its trailing type for the GIS one ("St. Andrews Dr" +
+    // GIS "ST ANDREWS PL" → "St. Andrews Pl"). Falls back to a title-cased GIS
+    // name if the difference isn't a clean trailing-type swap.
+    function titleCaseType(t) {
+        return t.charAt(0) + t.slice(1).toLowerCase();
+    }
+
+    function titleCaseName(name) {
+        return String(name).toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
+    }
+
+    function suggestedRename(segName, gisName) {
+        const gisTokens = normalizeStreet(gisName).split(' ');
+        const gisType = gisTokens[gisTokens.length - 1];
+        const segTokens = String(segName).trim().split(/\s+/);
+        const segLastNorm = normalizeStreet(segTokens[segTokens.length - 1]);
+        if (TYPE_ABBREVS.has(gisType) && segTokens.length > 1 && TYPE_ABBREVS.has(segLastNorm)) {
+            segTokens[segTokens.length - 1] = titleCaseType(gisType);
+            return segTokens.join(' ');
+        }
+        return titleCaseName(gisName);
+    }
+
     function hnStreetMatchFn(si) {
         if (!si.strictDir) {
             return (gisStreet) => streetsMatch(gisStreet, si.streetName);
@@ -1723,6 +1747,14 @@
             let rppCoveredCount = 0;
             let nearerOtherCount = 0;
             let dupCount = 0;
+            // Name-conflict detector (v.33): GIS points whose CORE name matches
+            // the selected street but whose TYPE/directional differs, with no
+            // real alternative street drawn — i.e. the segment is likely
+            // mistyped (Edwards: GIS "ST ANDREWS PL" vs WME "St. Andrews Dr").
+            // Keyed by the normalized GIS name → {name, count}; surfaced as a
+            // rename SUGGESTION (never auto-renamed).
+            const nameConflicts = new Map();
+            const selCores = new Set(segInfos.map((si) => streetCore(si.streetName)));
             // Add-key = target STREET + house number (v.31): WME house numbers
             // are unique PER STREET, so two GIS records for the same house —
             // even with different street spellings the GIS-side streetCore key
@@ -1790,6 +1822,15 @@
                     continue;
                 }
                 if (!segInfos.some((si) => si.match(p.street))) {
+                    // Near-miss: same CORE name as the selected street but the
+                    // type/dir differs → candidate segment-mistype (recorded now,
+                    // filtered after the loop against any real alternative road).
+                    if (selCores.has(streetCore(p.street))) {
+                        const key = normalizeStreet(p.street);
+                        const c = nameConflicts.get(key) || { name: p.street, norm: key, count: 0 };
+                        c.count++;
+                        nameConflicts.set(key, c);
+                    }
                     // Report-only, and only when it's AT the curb (a different street
                     // 100m out is normal geography, not a data discrepancy).
                     if (dSel <= HN_CONFIG.mismatchCorridorM) {
@@ -1831,7 +1872,17 @@
             }
             missing.sort((a, b) => (parseInt(a.hn, 10) || 0) - (parseInt(b.hn, 10) || 0));
 
-            renderHnResults(missing, mismatch);
+            // Keep only conflicts with NO real alternative road drawn — if a
+            // segment actually named like the GIS points exists in view, they
+            // belong THERE (two real streets), not a mistype. Threshold ≥2 so a
+            // single stray point doesn't nag.
+            const renameSuggestions = [...nameConflicts.values()]
+                .filter((c) => c.count >= 2
+                    && !segInfos.some((si) => streetsMatch(si.streetName, c.name))
+                    && !otherSegs.some((os) => os.street && streetsMatch(os.street, c.name)))
+                .sort((a, b) => b.count - a.count);
+
+            renderHnResults(missing, mismatch, renameSuggestions, segInfos);
             setHnScanning(false);
             const at = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
             const streets = [...new Set(segInfos.map((s) => s.streetName))].join(', ');
@@ -2024,7 +2075,7 @@
         }
     }
 
-    function renderHnResults(missing, mismatch) {
+    function renderHnResults(missing, mismatch, renameSuggestions, segInfos) {
         if (!hnResultsRef) {
             return;
         }
@@ -2033,6 +2084,21 @@
         if (hnAddAllRef) {
             hnAddAllRef.style.display = missing.length ? 'inline-block' : 'none';
             hnAddAllRef.textContent = `Add all (${missing.length})`;
+        }
+        // Rename suggestion first — it usually BLOCKS the real adds (matched on
+        // type), so surface it before MISSING so Josh sees it up top.
+        if (renameSuggestions && renameSuggestions.length) {
+            const segName = segInfos && segInfos.length ? segInfos[0].streetName : 'this segment';
+            renameSuggestions.forEach((c) => {
+                const target = suggestedRename(segName, c.name);
+                const box = document.createElement('div');
+                box.style.cssText = 'margin:6px 0;padding:7px 9px;background:#fff6e5;border-left:3px solid #e8a300;border-radius:4px;font-size:11px;color:#663c00;';
+                box.innerHTML = `⚠️ <b>Possible segment mis-name.</b> ${c.count} GIS address(es) here read `
+                    + `<b>"${titleCaseName(c.name)}"</b>, but the selected segment is <b>"${segName}"</b> and `
+                    + 'no such road is drawn nearby.<br>If the sign matches GIS, rename the segment to '
+                    + `→ <b style="font-size:12px;">${target}</b> ← in WME, then rescan.`;
+                hnResultsRef.appendChild(box);
+            });
         }
         if (missing.length) {
             hnResultsRef.appendChild(makeSectionHeader('MISSING — in GIS, not on the map:'));
