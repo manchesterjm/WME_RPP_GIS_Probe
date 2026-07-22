@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.22.33';
+    const SCRIPT_VERSION = '2026.07.22.34';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -65,7 +65,8 @@
         name: 'State of Colorado — Public Address Composite',
         url: 'https://gis.colorado.gov/public/rest/services/Address_and_Parcel/Colorado_Public_Addresses/MapServer/0/query',
         fields: (a) => ({
-            hn: a.AddrNum,
+            // Some counties zero-pad AddrNum (Summit "0967") — emit plain.
+            hn: String(a.AddrNum ?? '').trim().replace(/^0+(?=\d)/, ''),
             street: composeStreet(a),
             address: a.AddrFull || '',
             city: a.PlaceName || '',
@@ -253,6 +254,38 @@
                 zip: '',
                 subtype: '',
             }),
+        },
+        {
+            id: 'summit',
+            name: 'Summit County',
+            // 2026-07-22 (Beeler Pl, Copper Mtn): the sheet's Address_Points layer
+            // is EMPTY (0 records) — the live one, found via the org folder, is
+            // AddressesForGeocoding (41.8k, split fields; the CR alias sits in its
+            // own Alias column, not the street name). Summit zero-pads house
+            // numbers ("0902") — we emit them PLAIN (902, Josh's call 2026-07-22).
+            // bbox = data extent; listed AFTER Eagle, so the Vail Pass overlap
+            // band resolves to Eagle (Vail is real Eagle territory) and Summit's
+            // far west (Heeney) rides the empty-Eagle → statewide fallback, which
+            // composeStreet's AddrFull parser now handles.
+            url: 'https://services6.arcgis.com/dmNYNuTJZDtkcRJq/ArcGIS/rest/services/AddressesForGeocoding/FeatureServer/0/query',
+            bbox: [-106.4201, 39.3596, -105.7989, 39.9264],
+            fields: (a) => {
+                let hn = String(a.HouseNumberValue ?? a.HouseNumber ?? '').trim().replace(/^0+(?=\d)/, '');
+                const suffix = String(a.HouseSuffix ?? '').trim();
+                if (suffix && !hn.toUpperCase().endsWith(suffix.toUpperCase())) {
+                    hn += suffix;
+                }
+                const status = String(a.SitusStatusDescription ?? '').trim();
+                return {
+                    hn,
+                    street: joinStreet([a.PrefixDirectionAbbreviation, a.StreetName,
+                        a.SuffixAbbreviation, a.SuffixDirectionAbbreviation]),
+                    address: a.FullAddress || '',
+                    city: a.CityName || '',
+                    zip: a.ZipCode != null ? String(a.ZipCode) : '',
+                    subtype: (a.SitusAddressTypeDescription || '') + (status && status !== 'Current' ? ` (${status})` : ''),
+                };
+            },
         },
         {
             id: 'pueblo',
@@ -770,9 +803,28 @@
         return parts.map((p) => (p == null ? '' : String(p).trim())).filter(Boolean).join(' ');
     }
 
-    // The statewide composite's component column names.
+    // The statewide composite's component column names. Some counties publish
+    // NULL components with the street only inside AddrFull (Summit, found
+    // 2026-07-22: "0967 Beeler PL (CR 1194)" — zero-padded HN + parenthetical
+    // county-road alias) — fall back to parsing AddrFull: drop the trailing
+    // "(...)" alias, strip the leading house-number token, and if nothing is
+    // left the alias itself IS the street ("0050 CR 1201"-style records keep
+    // "CR 1201" via the normal strip).
     function composeStreet(a) {
-        return joinStreet([a.PreDir, a.PreType, a.StreetName, a.PostType, a.PostDir]);
+        const joined = joinStreet([a.PreDir, a.PreType, a.StreetName, a.PostType, a.PostDir]);
+        if (joined) {
+            return joined;
+        }
+        const full = String(a.AddrFull ?? '').trim();
+        if (!full) {
+            return '';
+        }
+        const alias = (full.match(/\(([^)]+)\)\s*$/) || [])[1] || '';
+        const street = full
+            .replace(/\s*\([^)]*\)\s*$/, '')
+            .replace(/^\d+[A-Za-z]?(?:\s+(?:1\/2|½))?\s+/, '')
+            .trim();
+        return street || alias.trim();
     }
 
     // Query ONE source's address-point service around (lon,lat). Resolves to
@@ -1289,9 +1341,10 @@
         return Math.round(Math.hypot(HN_CONFIG.sampleStepM / 2, hnCorridorM())) + 15;
     }
 
-    // House-number strings compare as normalized text ("123 A" == "123a"; letters + ½ pass through).
+    // House-number strings compare as normalized text ("123 A" == "123a"; letters + ½ pass
+    // through; leading zeros drop so Summit-style "0902" == "902").
     function normHn(v) {
-        const s = String(v ?? '').trim().toUpperCase().replace(/\s+/g, ' ');
+        const s = String(v ?? '').trim().toUpperCase().replace(/\s+/g, ' ').replace(/^0+(?=\d)/, '');
         return s === '' ? null : s;
     }
 
