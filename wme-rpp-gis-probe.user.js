@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.22.31';
+    const SCRIPT_VERSION = '2026.07.22.32';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -1490,10 +1490,15 @@
                 minLat = Math.min(minLat, c[1]);
                 maxLat = Math.max(maxLat, c[1]);
             }
+            let street = '';
+            try {
+                street = wmeSdk.DataModel.Segments.getAddress({ segmentId: attrs.id })?.street?.name || '';
+            } catch { /* unresolved — treated as a non-competitor (only same-street stretches compete) */ }
             out.push({
                 id: attrs.id,
                 line: turf.lineString(coords),
                 bounds: [minLon, minLat, maxLon, maxLat],
+                street,
                 barePlr: attrs.roadType === 20 && (attrs.primaryStreetID ?? attrs.primaryStreetId) == null,
             });
         }
@@ -1750,12 +1755,14 @@
                 if (dSel < corridorMin) {
                     continue;   // inside the band's near edge — user is targeting far-off houses
                 }
-                // v.30 NEAREST-SEGMENT rule (Josh): the point may only be added
-                // if the nearest DRAWN segment is a SELECTED one. Any other
-                // segment strictly nearer claims the point (its road/stretch) —
-                // except unnamed PLRs, which flag the 🅿/+RPP workflow instead.
-                // Bounds pre-check keeps this cheap: only segments whose box
-                // comes within dSel of the point can possibly beat dSel.
+                // v.32 SAME-STREET nearest-segment rule (Josh): only ANOTHER
+                // stretch of the SAME road that sits closer disqualifies a point
+                // ("select that stretch instead") — a differently-named cross
+                // street being geometrically nearer is irrelevant, because the
+                // house can never be addressed to it (v.30 wrongly let a corner
+                // lot's cul-de-sac steal an Arrowhead Dr address). Unnamed PLRs
+                // still flag the 🅿/+RPP workflow. Bounds pre-check keeps it
+                // cheap: only boxes within dSel of the point can beat dSel.
                 let plr = null;
                 let nearerOther = false;
                 const latPad = dSel / 110540;
@@ -1773,8 +1780,8 @@
                         if (!plr || d < plr.d) {
                             plr = { id: os.id, d };
                         }
-                    } else {
-                        nearerOther = true;
+                    } else if (os.street && streetsMatch(os.street, p.street)) {
+                        nearerOther = true;   // a nearer stretch of the SAME road
                         break;
                     }
                 }
