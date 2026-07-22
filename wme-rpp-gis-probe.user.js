@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.21.28';
+    const SCRIPT_VERSION = '2026.07.21.29';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -1503,7 +1503,7 @@
             try {
                 street = W.model.streets.getObjectById(attrs.streetID)?.attributes?.name || '';
             } catch { /* unresolved street — geometric fallback below */ }
-            if (street && segInfos.some((si) => streetsMatch(street, si.streetName))) {
+            if (street && segInfos.some((si) => si.match(street))) {
                 nums.add(norm);
                 continue;
             }
@@ -1512,6 +1512,43 @@
             }
         }
         return nums;
+    }
+
+    // Directional-SIBLING detection (v.29): the one-sided directional ignore
+    // ("E Woodmen Rd" matches bare "WOODMEN RD") is DANGEROUS exactly when both
+    // sides exist — small towns run "E Aspen St" and "W Aspen St" with the SAME
+    // house numbers on each, and cross-side matching duplicates everything.
+    // When a loaded street shares the selected street's dirless core but
+    // carries a DIFFERENT directional, matching for that street goes STRICT:
+    // the candidate must carry the SAME directional; bare names refuse.
+    function hasDirSibling(streetName) {
+        const n = normalizeStreet(streetName);
+        const d = dirOf(n);
+        if (!d) {
+            return false;
+        }
+        const core = stripDirs(n);
+        const stObjs = (W && W.model && W.model.streets && W.model.streets.objects) ? W.model.streets.objects : {};
+        for (const k in stObjs) {
+            const name = stObjs[k].attributes ? stObjs[k].attributes.name : null;
+            if (!name) {
+                continue;
+            }
+            const on = normalizeStreet(name);
+            const od = dirOf(on);
+            if (od && od !== d && stripDirs(on) === core) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function hnStreetMatchFn(si) {
+        if (!si.strictDir) {
+            return (gisStreet) => streetsMatch(gisStreet, si.streetName);
+        }
+        const want = dirOf(normalizeStreet(si.streetName));
+        return (gisStreet) => dirOf(normalizeStreet(gisStreet)) === want && streetsMatch(gisStreet, si.streetName);
     }
 
     // Loaded segments sharing a primary street with the selection — the HN
@@ -1597,7 +1634,14 @@
                     streetName,
                     primaryStreetId: seg.primaryStreetId,
                     line: turf.lineString(seg.geometry.coordinates),
+                    strictDir: hasDirSibling(streetName),
                 });
+            }
+            for (const si of segInfos) {
+                si.match = hnStreetMatchFn(si);
+                if (si.strictDir) {
+                    console.log(`${HN_LOG} "${si.streetName}" has a directional SIBLING loaded — strict side matching for this scan (bare GIS names refuse).`);
+                }
             }
             if (!segInfos.length) {
                 setHnScanning(false);
@@ -1666,7 +1710,7 @@
                 if (lineDist < corridorMin) {
                     continue;   // inside the band's near edge — user is targeting far-off houses
                 }
-                if (!segInfos.some((si) => streetsMatch(p.street, si.streetName))) {
+                if (!segInfos.some((si) => si.match(p.street))) {
                     // Report-only, and only when it's AT the curb (a different street
                     // 100m out is normal geography, not a data discrepancy).
                     if (lineDist <= HN_CONFIG.mismatchCorridorM) {
@@ -1704,7 +1748,7 @@
                         plr = { id: ps.id, d };
                     }
                 }
-                const matchedSeg = segInfos.find((si) => streetsMatch(p.street, si.streetName));
+                const matchedSeg = segInfos.find((si) => si.match(p.street));
                 missing.push({
                     hn: String(p.hn).trim(),
                     street: p.street,
