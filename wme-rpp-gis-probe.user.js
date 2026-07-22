@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.22.30';
+    const SCRIPT_VERSION = '2026.07.22.31';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -1717,6 +1717,13 @@
             let presentCount = 0;
             let rppCoveredCount = 0;
             let nearerOtherCount = 0;
+            let dupCount = 0;
+            // Add-key = target STREET + house number (v.31): WME house numbers
+            // are unique PER STREET, so two GIS records for the same house —
+            // even with different street spellings the GIS-side streetCore key
+            // didn't collapse — must add ONCE (the 2nd was the "already exists"
+            // save error Josh hit).
+            const proposedKeys = new Set();
             const corridor = hnCorridorM();
             const corridorMin = hnCorridorMinM();
             let offScreen = 0;
@@ -1793,6 +1800,15 @@
                     continue;
                 }
                 const matchedSeg = segInfos.find((si) => si.match(p.street));
+                const streetKey = matchedSeg.primaryStreetId != null
+                    ? String(matchedSeg.primaryStreetId)
+                    : normalizeStreet(matchedSeg.streetName);
+                const addKey = `${streetKey}|${norm}`;
+                if (proposedKeys.has(addKey)) {
+                    dupCount++;   // same street + HN already queued this scan
+                    continue;
+                }
+                proposedKeys.add(addKey);
                 missing.push({
                     hn: String(p.hn).trim(),
                     street: p.street,
@@ -1825,6 +1841,7 @@
             const tallyLine = `GIS: ${gis.points.length} point(s) fetched, ${onStreet} on-street (${bandDesc}) · ${presentCount} already mapped`
                 + `${rppCoveredCount ? ` · ${rppCoveredCount} covered by RPPs` : ''}`
                 + ` · <b>${missing.length} missing</b> · ${mismatch.length} street-mismatch`
+                + `${dupCount ? ` · ${dupCount} duplicate GIS record(s) collapsed` : ''}`
                 + `${nearerOtherCount ? ` · ${nearerOtherCount} nearest to an UNSELECTED segment (select that stretch to work them)` : ''}`
                 + `${offScreen ? ` · ${offScreen} off-screen (pan/zoom out to reach them)` : ''}`
                 + `<br><span style="color:#235;">🗺️ ${srcDesc}</span>${notes ? `<br><span style="color:#888;">${notes}</span>` : ''}`;
