@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.24.36';
+    const SCRIPT_VERSION = '2026.07.24.37';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -749,6 +749,52 @@
 
     const TYPE_ABBREVS = new Set(Object.values(STREET_TYPES));
 
+    // RAW normalization (v.37): the same pipeline as normalizeStreet but
+    // WITHOUT the per-token type mapping. The mapping is what blinded the
+    // matcher to merged-vs-split names whose split words happen to be type
+    // abbreviations — "RIVER GLEN DR" canonicalizes to "RIV GLN DR", so the
+    // space-squash could never equal WME's "Riverglen Dr" (Glenview field bug
+    // 2026-07-24: every guard rides streetsMatch, so the neighboring road
+    // passed the alias filter). Raw forms restore that comparison.
+    function normalizeStreetRaw(name) {
+        if (!name) {
+            return '';
+        }
+        const cleaned = String(name).toUpperCase()
+            .replace(/\./g, '').replace(/-/g, ' ').replace(/\s+/g, ' ').trim();
+        const route = canonicalizeRoute(cleaned);
+        if (route) {
+            return route;
+        }
+        const tokens = canonicalizeOrdinals(cleaned.split(' '));
+        if (tokens.length > 1 && DIR_CANON[tokens[0]]) {
+            tokens[0] = DIR_CANON[tokens[0]];
+        }
+        if (tokens.length > 1 && DIR_CANON[tokens[tokens.length - 1]]) {
+            tokens[tokens.length - 1] = DIR_CANON[tokens[tokens.length - 1]];
+        }
+        return tokens.join(' ');
+    }
+
+    // Trailing-type strip on a RAW form: the last token is a type whether it's
+    // a variant ("DRIVE") or already an abbreviation ("DR").
+    function coreFromRaw(n) {
+        const tokens = n.split(' ');
+        const last = tokens[tokens.length - 1];
+        if (tokens.length > 1 && (STREET_TYPES[last] || TYPE_ABBREVS.has(last))) {
+            tokens.pop();
+        }
+        return tokens.join(' ');
+    }
+
+    // Space-squashed comparison of raw forms, same one-sided-type doctrine as
+    // pairMatches ("RIVERGLEN DR" == "RIVER GLEN DR"; conflicting types still
+    // refuse because a stripped side must equal the OTHER SIDE IN FULL).
+    function rawPairMatches(x, y) {
+        const sq = (s) => s.replace(/ /g, '');
+        return sq(x) === sq(y) || sq(coreFromRaw(x)) === sq(y) || sq(coreFromRaw(y)) === sq(x);
+    }
+
     function coreFromNorm(n) {
         const tokens = n.split(' ');
         if (tokens.length > 1 && TYPE_ABBREVS.has(tokens[tokens.length - 1])) {
@@ -805,17 +851,23 @@
         if (da && db && da !== db) {
             return false;
         }
-        if (pairMatches(na, nb)) {
+        // Each comparison runs in BOTH lanes: canonical (type-mapped) and raw
+        // (v.37) — raw catches merged-vs-split names the mapping blinds the
+        // squash to ("Riverglen Dr" vs "RIVER GLEN DR" → "RIV GLN DR").
+        const qa = normalizeStreetRaw(a);
+        const qb = normalizeStreetRaw(b);
+        const bothLanes = (x, y, rx, ry) => pairMatches(x, y) || rawPairMatches(rx, ry);
+        if (bothLanes(na, nb, qa, qb)) {
             return true;
         }
         if (da && !db) {
-            return pairMatches(stripDirs(na), nb);
+            return bothLanes(stripDirs(na), nb, stripDirs(qa), qb);
         }
         if (db && !da) {
-            return pairMatches(na, stripDirs(nb));
+            return bothLanes(na, stripDirs(nb), qa, stripDirs(qb));
         }
         if (da && db) {
-            return pairMatches(stripDirs(na), stripDirs(nb));
+            return bothLanes(stripDirs(na), stripDirs(nb), stripDirs(qa), stripDirs(qb));
         }
         return false;
     }

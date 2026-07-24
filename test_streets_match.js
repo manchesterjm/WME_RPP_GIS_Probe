@@ -72,6 +72,16 @@ const cases = [
     ['W CR-4', 'E COUNTY ROAD 4', false],            // conflicting directionals refuse
     ['W CR-4', 'W COUNTY ROAD 5', false],            // different numbers still refuse
     ['N Highway View Dr', 'N HIGHWAY VIEW DR', true],// dir + route words inside a real name: untouched
+    // Merged-vs-split names whose split words are TYPE ABBREVIATIONS
+    // (2026-07-24 Glenview field bug: "RIVER GLEN DR" canonicalizes to
+    // "RIV GLN DR", blinding the space-squash — raw lane restores it):
+    ['Riverglen Dr', 'RIVER GLEN DR', true],
+    ['River Glen Dr', 'RIVERGLEN DR', true],
+    ['Riverglen Dr', 'RIVER GLEN', true],            // GIS bare, one-sided type strip
+    ['Glenview Dr', 'GLEN VIEW DR', true],           // same class (GLEN/VIEW both map)
+    ['Springcreek Dr', 'SPRING CREEK DR', true],
+    ['Glenview Dr', 'RIVER GLEN DR', false],         // neighbors stay distinct
+    ['Riverglen Dr', 'RIVERGLEN CT', false],         // conflicting types still refuse
     // Cardinal directionals (2026-07-21, Josh: translate + one-sided ignore):
     ['E Woodmen Rd', 'WOODMEN RD', true],            // FLIPPED from the old intentional gap: one-sided dir ignored
     ['E Woodmen Rd', 'EAST WOODMEN RD', true],       // spelled-out translator
