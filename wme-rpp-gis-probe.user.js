@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.24.35';
+    const SCRIPT_VERSION = '2026.07.24.36';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -1655,6 +1655,34 @@
         return false;
     }
 
+    // A loaded segment ANYWHERE in the model (however far — the model keeps
+    // everything panned across) uses a street of this name as its PRIMARY →
+    // it's a real road somewhere, not an alias of the selection (v.36 guard).
+    // Alt-only usage does NOT refuse: a neighboring stretch of the same road
+    // already carrying the name as an alternate is evidence FOR the alias.
+    function streetNameIsPrimarySomewhere(name) {
+        const stObjs = (W && W.model && W.model.streets && W.model.streets.objects) ? W.model.streets.objects : {};
+        const matchIds = new Set();
+        for (const k in stObjs) {
+            const known = stObjs[k].attributes ? stObjs[k].attributes.name : null;
+            if (known && streetsMatch(known, name)) {
+                matchIds.add(stObjs[k].attributes.id);
+            }
+        }
+        if (!matchIds.size) {
+            return false;
+        }
+        const segObjs = (W && W.model && W.model.segments && W.model.segments.objects) ? W.model.segments.objects : {};
+        for (const sid in segObjs) {
+            const attrs = segObjs[sid].attributes || {};
+            const stId = attrs.primaryStreetID ?? attrs.primaryStreetId;
+            if (stId != null && matchIds.has(stId)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     // Suggested WME name for a mis-typed segment: keep the segment's own text
     // and casing, swap its trailing type for the GIS one ("St. Andrews Dr" +
     // GIS "ST ANDREWS PL" → "St. Andrews Pl"). Falls back to a title-cased GIS
@@ -1945,10 +1973,15 @@
                         // Genuinely different name (not a type swap) → candidate
                         // ALTERNATE name for the selection (v.35): offered as a
                         // reviewed "add as alt" if it survives the post-loop
-                        // filter (≥2 points, no drawn road actually named that).
+                        // filter (≥2 points, hugs the road, name unknown to the
+                        // model, no drawn road named that).
                         const key = normalizeStreet(p.street);
-                        const c = altNameCands.get(key) || { name: p.street, norm: key, count: 0, cities: new Map() };
+                        const c = altNameCands.get(key) || {
+                            name: p.street, norm: key, count: 0, cities: new Map(), minDist: Infinity, maxDist: 0,
+                        };
                         c.count++;
+                        c.minDist = Math.min(c.minDist, dSel);
+                        c.maxDist = Math.max(c.maxDist, dSel);
                         if (p.city) {
                             c.cities.set(p.city, (c.cities.get(p.city) || 0) + 1);
                         }
@@ -2008,12 +2041,19 @@
                     && !otherSegs.some((os) => os.street && streetsMatch(os.street, c.name)))
                 .sort((a, b) => b.count - a.count);
 
-            // Alt-name candidates survive the same sanity filter (v.35): ≥2
-            // points backing the name and no drawn road actually named that —
-            // then a reviewed "Add as alt" wires the name (+city) onto the
-            // selection and rescans so its HNs become addable.
+            // Alt-name candidates (v.36 — Berthoud field lesson: a 630m band
+            // swept in Meining Rd / Green Ridge Rd, real parallel roads that
+            // simply weren't drawn in view, and v.35 offered them as aliases):
+            //   ≥2 points; the nearest point must HUG the selected road (a true
+            //   alias's points are this road's own frontage — a far tight
+            //   cluster is a neighboring road); the name must be unknown to the
+            //   WHOLE loaded street model (not just drawn-in-view segments);
+            //   and no drawn road in view named that.
+            const aliasCurbM = Math.min(corridor, HN_CONFIG.corridorM);
             const altNameSuggestions = [...altNameCands.values()]
                 .filter((c) => c.count >= 2
+                    && c.minDist <= aliasCurbM
+                    && !streetNameIsPrimarySomewhere(c.name)
                     && !otherSegs.some((os) => os.street && streetsMatch(os.street, c.name)))
                 .sort((a, b) => b.count - a.count);
 
@@ -2255,6 +2295,7 @@
         if (wmeSdk.Editing.getUnsavedChangesCount() >= HN_CONFIG.saveQueueLimit) {
             return { ok: false, err: `WME's save queue is full (${HN_CONFIG.saveQueueLimit}) — SAVE in WME, then retry` };
         }
+        const before = wmeSdk.Editing.getUnsavedChangesCount();
         try {
             const altName = titleCaseName(cand.name);
             const { cityId, cityName } = altCandidateCity(cand, consensusCity, segInfos[0]);
@@ -2263,6 +2304,9 @@
                 segmentIds: segInfos.map((si) => si.id),
                 streetId: street.id,
             });
+            if (wmeSdk.Editing.getUnsavedChangesCount() <= before) {
+                return { ok: false, err: 'no edit registered — check the console' };
+            }
             console.log(`${HN_LOG} added alt "${altName}${cityName ? `, ${cityName}` : ''}" (street ${street.id}) to segment(s) ${segInfos.map((si) => si.id).join(', ')} — UNSAVED.`);
             return { ok: true, altName, cityName };
         } catch (e) {
@@ -2330,6 +2374,7 @@
         if (!seg) {
             return { ok: false, err: 'segment no longer loaded — rescan' };
         }
+        const before = wmeSdk.Editing.getUnsavedChangesCount();
         try {
             const city = ensureCity(plan.cityName);
             const altIds = plan.keep.map((k) => (typeof k === 'number' ? k : ensureStreet(k.needStreet, city.id).id));
@@ -2342,6 +2387,9 @@
                     alternateStreetIds: [...new Set(altIds)],
                 },
             });
+            if (wmeSdk.Editing.getUnsavedChangesCount() <= before) {
+                return { ok: false, err: 'no edit registered — check the console' };
+            }
             console.log(`${HN_LOG} city repair on segment ${plan.si.id}: ${plan.actions.join(' · ')} — UNSAVED.`);
             return { ok: true };
         } catch (e) {
@@ -2393,7 +2441,8 @@
                 box.style.cssText = 'margin:6px 0;padding:7px 9px;background:#eef3ff;border-left:3px solid #4a6fd0;border-radius:4px;font-size:11px;color:#1c2c5e;';
                 const txt = document.createElement('div');
                 txt.innerHTML = `🔀 <b>GIS uses another name here.</b> ${c.count} GIS address(es) along the selection read `
-                    + `<b>"${titleCaseName(c.name)}"</b> (segment: <b>"${segName}"</b>, not in its alternates; no road of that name drawn nearby).`;
+                    + `<b>"${titleCaseName(c.name)}"</b>, ${Math.round(c.minDist)}–${Math.round(c.maxDist)}m from the road `
+                    + `(segment: <b>"${segName}"</b>, not in its alternates; no road of that name known to the map).`;
                 const btn = document.createElement('button');
                 btn.textContent = `Add alt "${label}" + rescan`;
                 btn.title = 'Add this name as an ALTERNATE street on the selected segment(s) (unsaved), then rescan so its house numbers become addable. The primary name and city are not touched.';
