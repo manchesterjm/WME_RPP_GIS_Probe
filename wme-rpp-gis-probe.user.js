@@ -1569,7 +1569,10 @@
                             seen.set(k, p);
                         }
                     }
-                    return { error: null, points: [...seen.values()], source: requestedLocal, usedFallback: false, merged: true };
+                    return {
+                        error: null, points: [...seen.values()], source: requestedLocal,
+                        usedFallback: false, merged: true,
+                    };
                 }
                 return { error: null, points: local.points, source: requestedLocal, usedFallback: false };
             }
