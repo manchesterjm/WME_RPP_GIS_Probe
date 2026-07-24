@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.24.39';
+    const SCRIPT_VERSION = '2026.07.24.40';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -1549,6 +1549,28 @@
         if (requestedLocal) {
             const local = await querySamplesWithSource(segInfos, requestedLocal, radius, scanBbox);
             if (!local.error && local.points.length) {
+                // v.40 county-line coverage hole (CR-2 field case): the local
+                // source covers the AREA but not THIS ROAD — Boulder had only
+                // cross-street points; the "W COUNTY ROAD 2" houses are the
+                // neighboring county's addressing and live in the statewide
+                // composite only. If NOTHING street-matches the selection,
+                // pull statewide too and merge (deduped by street+HN).
+                const anyOnStreet = local.points.some((p) => segInfos.some((si) => si.match(p.street)));
+                if (anyOnStreet) {
+                    return { error: null, points: local.points, source: requestedLocal, usedFallback: false };
+                }
+                console.warn(`${HN_LOG} ${requestedLocal.name} has no on-street points here → merging statewide.`);
+                const state = await querySamplesWithSource(segInfos, STATEWIDE_SOURCE, radius, scanBbox);
+                if (!state.error && state.points.length) {
+                    const seen = new Map(local.points.map((p) => [hnKey(p.street, p.hn), p]));
+                    for (const p of state.points) {
+                        const k = hnKey(p.street, p.hn);
+                        if (!seen.has(k)) {
+                            seen.set(k, p);
+                        }
+                    }
+                    return { error: null, points: [...seen.values()], source: requestedLocal, usedFallback: false, merged: true };
+                }
                 return { error: null, points: local.points, source: requestedLocal, usedFallback: false };
             }
             console.warn(`${HN_LOG} ${requestedLocal.name} ${local.error ? `failed (${local.error})` : 'returned no points'} → statewide fallback.`);
@@ -2178,9 +2200,14 @@
             setHnScanning(false);
             const at = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
             const streets = [...new Set(segInfos.map((s) => s.streetName))].join(', ');
-            const srcDesc = gis.usedFallback
-                ? `${STATEWIDE_SOURCE.name} — fallback · ${sourceHost(STATEWIDE_SOURCE)}`
-                : `${gis.source.name}${gis.source.id === STATEWIDE_SOURCE.id ? '' : ' (local)'} · ${sourceHost(gis.source)}`;
+            let srcDesc;
+            if (gis.usedFallback) {
+                srcDesc = `${STATEWIDE_SOURCE.name} — fallback · ${sourceHost(STATEWIDE_SOURCE)}`;
+            } else if (gis.merged) {
+                srcDesc = `${gis.source.name} (local) + statewide merge — local had no on-street points here`;
+            } else {
+                srcDesc = `${gis.source.name}${gis.source.id === STATEWIDE_SOURCE.id ? '' : ' (local)'} · ${sourceHost(gis.source)}`;
+            }
             const notes = [
                 offView ? `${offView} selected segment(s) OFF-VIEW skipped — pan there and rescan for the rest` : '',
                 capped ? `first ${HN_CONFIG.maxSegmentsPerScan} of ${visibleIds.length} visible selected segments` : '',
