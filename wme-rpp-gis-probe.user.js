@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.22.34';
+    const SCRIPT_VERSION = '2026.07.24.35';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -609,17 +609,20 @@
         return null;
     }
 
-    // {sys, nums} for a canonical route string ('US 50', 'HWY 6&50'), else null.
+    // {dir, sys, nums} for a canonical route string ('US 50', 'W CR 4',
+    // 'HWY 6&50'), else null. dir is the optional leading directional a
+    // directional-prefixed county road carries (v.35 — the old "E County
+    // Road 30 passes through unrouted" gap).
     function parseRoute(n) {
-        const m = n.match(/^(CR|SH|US|I|HWY) (\d+[A-Z]?)(?:&(\d+[A-Z]?))?$/);
+        const m = n.match(/^(?:(N|S|E|W|NE|NW|SE|SW) )?(CR|SH|US|I|HWY) (\d+[A-Z]?)(?:&(\d+[A-Z]?))?$/);
         if (!m) {
             return null;
         }
-        const nums = new Set([m[2]]);
-        if (m[3]) {
-            nums.add(m[3]);
+        const nums = new Set([m[3]]);
+        if (m[4]) {
+            nums.add(m[4]);
         }
-        return { sys: m[1], nums };
+        return { dir: m[1] || null, sys: m[2], nums };
     }
 
     // Ordinal street names (2026-07-21): GIS spells them out (FIRST, SECOND,
@@ -698,6 +701,25 @@
         if (tokens.length > 1 && DIR_CANON[tokens[tokens.length - 1]]) {
             tokens[tokens.length - 1] = DIR_CANON[tokens[tokens.length - 1]];
         }
+        // Directional-prefixed/suffixed numbered routes (v.35 — closes the old
+        // "E County Road 30 passes through unrouted" gap; hit live on Berthoud's
+        // "W CR-4" vs GIS "W COUNTY ROAD 4"): peel the directional, route the
+        // remainder, carry the directional in front ('W CR 4'). Anchored route
+        // regexes keep real names ("N Highway View Dr") untouched.
+        if (tokens.length > 2) {
+            if (DIR_SET.has(tokens[0])) {
+                const r = canonicalizeRoute(tokens.slice(1).join(' '));
+                if (r) {
+                    return `${tokens[0]} ${r}`;
+                }
+            }
+            if (DIR_SET.has(tokens[tokens.length - 1])) {
+                const r = canonicalizeRoute(tokens.slice(0, -1).join(' '));
+                if (r) {
+                    return `${tokens[tokens.length - 1]} ${r}`;
+                }
+            }
+        }
         return tokens.map((tok) => STREET_TYPES[tok] || tok).join(' ');
     }
 
@@ -765,6 +787,11 @@
         const rb = parseRoute(nb);
         if (ra || rb) {
             if (!ra || !rb) {
+                return false;
+            }
+            // Same directional doctrine as real names (v.35): conflicting
+            // sides refuse ("W CR 4" ≠ "E CR 4"), one-sided is ignored.
+            if (ra.dir && rb.dir && ra.dir !== rb.dir) {
                 return false;
             }
             const wildcardOk = (x, y) => x.sys === 'HWY' && (y.sys === 'SH' || y.sys === 'US' || y.sys === 'HWY');
@@ -1652,29 +1679,44 @@
         return titleCaseName(gisName);
     }
 
-    function hnStreetMatchFn(si) {
-        if (!si.strictDir) {
-            return (gisStreet) => streetsMatch(gisStreet, si.streetName);
+    // One matcher per segment NAME (primary + every alternate, v.35) — the
+    // dir-sibling strictness is judged per name, since an alt can have a
+    // sibling its primary doesn't.
+    function matcherForName(name) {
+        if (!hasDirSibling(name)) {
+            return (gisStreet) => streetsMatch(gisStreet, name);
         }
-        const want = dirOf(normalizeStreet(si.streetName));
-        return (gisStreet) => dirOf(normalizeStreet(gisStreet)) === want && streetsMatch(gisStreet, si.streetName);
+        const want = dirOf(normalizeStreet(name));
+        return (gisStreet) => dirOf(normalizeStreet(gisStreet)) === want && streetsMatch(gisStreet, name);
     }
 
-    // Loaded segments sharing a primary street with the selection — the HN
-    // dedupe universe AND the snap-target candidates (numbers near a segment end
-    // may belong on the neighboring same-street segment).
+    function hnStreetMatchFn(si) {
+        const matchers = [si.streetName, ...(si.altNames || [])].map(matcherForName);
+        return (gisStreet) => matchers.some((m) => m(gisStreet));
+    }
+
+    // Loaded segments sharing a street with the selection — the HN dedupe
+    // universe AND the snap-target candidates (numbers near a segment end may
+    // belong on the neighboring same-street segment). v.35: "sharing" means
+    // ANY street id in common, primary or alternate on either side, so a
+    // stretch carrying the road name only as an alt still dedupes.
     function sameStreetFamily(streetIds, viewBbox) {
         const family = [];
         const segObjs = (W && W.model && W.model.segments && W.model.segments.objects) ? W.model.segments.objects : {};
         for (const sid in segObjs) {
             const attrs = segObjs[sid].attributes || {};
-            const stId = attrs.primaryStreetID ?? attrs.primaryStreetId;
-            if (stId == null || !streetIds.has(stId)) {
+            if (attrs.id == null) {
                 continue;
             }
             const seg = wmeSdk.DataModel.Segments.getById({ segmentId: attrs.id });
-            if (seg && seg.geometry && seg.geometry.coordinates && seg.geometry.coordinates.length >= 2
-                && (!viewBbox || lineTouchesBbox(seg.geometry.coordinates, viewBbox))) {
+            if (!seg || !seg.geometry || !seg.geometry.coordinates || seg.geometry.coordinates.length < 2) {
+                continue;
+            }
+            const segStreetIds = [seg.primaryStreetId, ...(seg.alternateStreetIds || [])];
+            if (!segStreetIds.some((x) => x != null && streetIds.has(x))) {
+                continue;
+            }
+            if (!viewBbox || lineTouchesBbox(seg.geometry.coordinates, viewBbox)) {
                 family.push({ id: attrs.id, line: turf.lineString(seg.geometry.coordinates) });
             }
         }
@@ -1731,8 +1773,14 @@
             for (const id of scanIds) {
                 const seg = wmeSdk.DataModel.Segments.getById({ segmentId: id });
                 let streetName = '';
+                let altNames = [];
                 try {
-                    streetName = wmeSdk.DataModel.Segments.getAddress({ segmentId: id })?.street?.name || '';
+                    const addr = wmeSdk.DataModel.Segments.getAddress({ segmentId: id });
+                    streetName = addr?.street?.name || '';
+                    // Alternate street names count as on-street too (v.35, Josh:
+                    // GIS often carries the alt — Berthoud "W COUNTY ROAD 4" vs
+                    // primary "W CR-4" with the GIS name sitting in the alts).
+                    altNames = (addr?.altStreets || []).map((alt) => alt?.street?.name).filter(Boolean);
                 } catch { /* treated as unresolvable below */ }
                 if (!seg || !streetName) {
                     skipped.push(id);
@@ -1741,7 +1789,9 @@
                 segInfos.push({
                     id,
                     streetName,
+                    altNames,
                     primaryStreetId: seg.primaryStreetId,
+                    altStreetIds: (seg.alternateStreetIds || []).filter((x) => x != null),
                     line: turf.lineString(seg.geometry.coordinates),
                     strictDir: hasDirSibling(streetName),
                 });
@@ -1758,7 +1808,8 @@
                 return;
             }
 
-            const streetIds = new Set(segInfos.map((s) => s.primaryStreetId).filter((x) => x != null));
+            const streetIds = new Set(segInfos.flatMap((s) => [s.primaryStreetId, ...s.altStreetIds])
+                .filter((x) => x != null));
             // v.18 split: KNOWLEDGE is model-wide, WRITES are view-only.
             // familyAll feeds the dedupe fetch (clipping it caused real
             // "House number already exists" save errors — numbers on loaded
@@ -1807,7 +1858,14 @@
             // Keyed by the normalized GIS name → {name, count}; surfaced as a
             // rename SUGGESTION (never auto-renamed).
             const nameConflicts = new Map();
-            const selCores = new Set(segInfos.map((si) => streetCore(si.streetName)));
+            const selCores = new Set(segInfos.flatMap((si) => [si.streetName, ...si.altNames].map(streetCore)));
+            // Unmatched GIS names that are NOT a type-swap of the selection
+            // (different core) — candidate ALTERNATE names (v.35, Josh's #2):
+            // normalized name → {name, count, cities}.
+            const altNameCands = new Map();
+            // GIS city tally over matched on-street points → consensus city
+            // for the city-repair action (v.35, Josh's #3).
+            const cityTally = new Map();
             // Add-key = target STREET + house number (v.31): WME house numbers
             // are unique PER STREET, so two GIS records for the same house —
             // even with different street spellings the GIS-side streetCore key
@@ -1883,6 +1941,18 @@
                         const c = nameConflicts.get(key) || { name: p.street, norm: key, count: 0 };
                         c.count++;
                         nameConflicts.set(key, c);
+                    } else if (p.street) {
+                        // Genuinely different name (not a type swap) → candidate
+                        // ALTERNATE name for the selection (v.35): offered as a
+                        // reviewed "add as alt" if it survives the post-loop
+                        // filter (≥2 points, no drawn road actually named that).
+                        const key = normalizeStreet(p.street);
+                        const c = altNameCands.get(key) || { name: p.street, norm: key, count: 0, cities: new Map() };
+                        c.count++;
+                        if (p.city) {
+                            c.cities.set(p.city, (c.cities.get(p.city) || 0) + 1);
+                        }
+                        altNameCands.set(key, c);
                     }
                     // Report-only, and only when it's AT the curb (a different street
                     // 100m out is normal geography, not a data discrepancy).
@@ -1890,6 +1960,9 @@
                         mismatch.push(p);
                     }
                     continue;
+                }
+                if (p.city) {
+                    cityTally.set(p.city, (cityTally.get(p.city) || 0) + 1);
                 }
                 const norm = normHn(p.hn);
                 if (rppNums.has(norm)) {
@@ -1935,7 +2008,23 @@
                     && !otherSegs.some((os) => os.street && streetsMatch(os.street, c.name)))
                 .sort((a, b) => b.count - a.count);
 
-            renderHnResults(missing, mismatch, renameSuggestions, segInfos);
+            // Alt-name candidates survive the same sanity filter (v.35): ≥2
+            // points backing the name and no drawn road actually named that —
+            // then a reviewed "Add as alt" wires the name (+city) onto the
+            // selection and rescans so its HNs become addable.
+            const altNameSuggestions = [...altNameCands.values()]
+                .filter((c) => c.count >= 2
+                    && !otherSegs.some((os) => os.street && streetsMatch(os.street, c.name)))
+                .sort((a, b) => b.count - a.count);
+
+            // GIS consensus city along the selection (v.35, Josh's ruling
+            // 2026-07-24) — feeds the city-repair action and new alts' cities.
+            // The city NEVER touches the primary slot (city-boundary skew rule).
+            const consensusCity = [...cityTally.entries()].sort((a, b) => b[1] - a[1])
+                .map(([name]) => titleCaseName(name))[0] || null;
+
+            renderHnResults(missing, mismatch, renameSuggestions, segInfos,
+                { altNameSuggestions, consensusCity });
             setHnScanning(false);
             const at = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
             const streets = [...new Set(segInfos.map((s) => s.streetName))].join(', ');
@@ -2128,10 +2217,143 @@
         }
     }
 
-    function renderHnResults(missing, mismatch, renameSuggestions, segInfos) {
+    // ---- alt-name + city writes (v.35 — reviewed, save-stack edits) ----------
+
+    function ensureCity(cityName) {
+        return wmeSdk.DataModel.Cities.getCity({ cityName })
+            || wmeSdk.DataModel.Cities.addCity({ cityName });
+    }
+
+    function ensureStreet(streetName, cityId) {
+        const args = cityId != null ? { streetName, cityId } : { streetName };
+        return wmeSdk.DataModel.Streets.getStreet(args)
+            || wmeSdk.DataModel.Streets.addStreet(args);
+    }
+
+    // The city a NEW alt should carry: the candidate's own GIS majority city,
+    // else the scan's consensus, else the primary street's existing city id
+    // (which may be the empty city — better than silently inheriting the top
+    // city, which is what an omitted cityId would do).
+    function altCandidateCity(cand, consensusCity, si) {
+        const own = [...cand.cities.entries()].sort((a, b) => b[1] - a[1]).map(([n]) => titleCaseName(n))[0];
+        const cityName = own || consensusCity;
+        if (cityName) {
+            return { cityId: ensureCity(cityName).id, cityName };
+        }
+        const primaryCityId = si.primaryStreetId != null
+            ? wmeSdk.DataModel.Streets.getById({ streetId: si.primaryStreetId })?.cityId
+            : null;
+        return { cityId: primaryCityId ?? null, cityName: null };
+    }
+
+    // Add a GIS-attested name as an ALTERNATE street (+city) on the selected
+    // segments — Josh's #2. Never touches the primary (city-boundary rule).
+    function addGisAltName(cand, segInfos, consensusCity) {
+        if (!wmeSdk) {
+            return { ok: false, err: 'SDK unavailable' };
+        }
+        if (wmeSdk.Editing.getUnsavedChangesCount() >= HN_CONFIG.saveQueueLimit) {
+            return { ok: false, err: `WME's save queue is full (${HN_CONFIG.saveQueueLimit}) — SAVE in WME, then retry` };
+        }
+        try {
+            const altName = titleCaseName(cand.name);
+            const { cityId, cityName } = altCandidateCity(cand, consensusCity, segInfos[0]);
+            const street = ensureStreet(altName, cityId);
+            wmeSdk.DataModel.Segments.addAlternateStreet({
+                segmentIds: segInfos.map((si) => si.id),
+                streetId: street.id,
+            });
+            console.log(`${HN_LOG} added alt "${altName}${cityName ? `, ${cityName}` : ''}" (street ${street.id}) to segment(s) ${segInfos.map((si) => si.id).join(', ')} — UNSAVED.`);
+            return { ok: true, altName, cityName };
+        } catch (e) {
+            return { ok: false, err: `${e.name || 'error'}: ${e.message}` };
+        }
+    }
+
+    // City repair plan for one selected segment — Josh's #3. Rules:
+    //   • primary's city slot is NEVER touched (only in-boundary segments may
+    //     carry a primary city — manual call);
+    //   • a city-less PRIMARY gets a "primary name + city" ALT (unless a
+    //     same-name alt already carries a city);
+    //   • every NAMED city-less alt is upgraded to "name + city" and the bare
+    //     one is DROPPED (alt slots are limited);
+    //   • name-less alts (the city-only alt pattern) are kept untouched.
+    // keep[] holds street ids to retain as-is, or {needStreet} placeholders
+    // resolved against the repair city at apply time.
+    function planCityRepair(si, cityName) {
+        let addr;
+        try {
+            addr = wmeSdk.DataModel.Segments.getAddress({ segmentId: si.id });
+        } catch {
+            return null;
+        }
+        const primaryName = addr?.street?.name || '';
+        const primaryHasCity = !!(addr?.city && !addr.city.isEmpty && addr.city.name);
+        const alts = addr?.altStreets || [];
+        if (alts.some((a) => a?.street?.id == null)) {
+            return null;   // can't rebuild the alt list faithfully — leave manual
+        }
+        const actions = [];
+        const keep = [];
+        for (const a of alts) {
+            const altName = a.street.name || '';
+            const altCity = (a.city && !a.city.isEmpty && a.city.name) || '';
+            if (altCity || !altName) {
+                keep.push(a.street.id);
+                continue;
+            }
+            actions.push(`upgrade “${altName}” → “${altName}, ${cityName}” (drop the city-less alt)`);
+            keep.push({ needStreet: altName });
+        }
+        if (!primaryHasCity && primaryName) {
+            const covered = alts.some((a) => {
+                const altCity = (a.city && !a.city.isEmpty && a.city.name) || '';
+                return altCity && a.street.name
+                    && normalizeStreet(a.street.name) === normalizeStreet(primaryName);
+            });
+            if (!covered) {
+                actions.push(`add alt “${primaryName}, ${cityName}”`);
+                keep.push({ needStreet: primaryName });
+            }
+        }
+        return actions.length ? { si, cityName, actions, keep } : null;
+    }
+
+    function applyCityRepair(plan) {
+        if (!wmeSdk) {
+            return { ok: false, err: 'SDK unavailable' };
+        }
+        if (wmeSdk.Editing.getUnsavedChangesCount() >= HN_CONFIG.saveQueueLimit) {
+            return { ok: false, err: `WME's save queue is full (${HN_CONFIG.saveQueueLimit}) — SAVE in WME, then retry` };
+        }
+        const seg = wmeSdk.DataModel.Segments.getById({ segmentId: plan.si.id });
+        if (!seg) {
+            return { ok: false, err: 'segment no longer loaded — rescan' };
+        }
+        try {
+            const city = ensureCity(plan.cityName);
+            const altIds = plan.keep.map((k) => (typeof k === 'number' ? k : ensureStreet(k.needStreet, city.id).id));
+            wmeSdk.DataModel.Segments.updateAddress({
+                segmentId: plan.si.id,
+                // primaryStreetId passed back EXPLICITLY so the full-list alt
+                // replace can never disturb the primary address.
+                addressData: {
+                    primaryStreetId: seg.primaryStreetId,
+                    alternateStreetIds: [...new Set(altIds)],
+                },
+            });
+            console.log(`${HN_LOG} city repair on segment ${plan.si.id}: ${plan.actions.join(' · ')} — UNSAVED.`);
+            return { ok: true };
+        } catch (e) {
+            return { ok: false, err: `${e.name || 'error'}: ${e.message}` };
+        }
+    }
+
+    function renderHnResults(missing, mismatch, renameSuggestions, segInfos, extra) {
         if (!hnResultsRef) {
             return;
         }
+        const { altNameSuggestions = [], consensusCity = null } = extra || {};
         hnResultsRef.innerHTML = '';
         hnPendingRows = [];
         if (hnAddAllRef) {
@@ -2152,6 +2374,84 @@
                     + `→ <b style="font-size:12px;">${target}</b> ← in WME, then rescan.`;
                 hnResultsRef.appendChild(box);
             });
+        }
+        // GIS name that matches neither primary nor alts and is NOT a type
+        // swap → reviewed "add as alternate name" (v.35, Josh's #2). On
+        // success the scan re-runs so the name's HNs surface as Add rows.
+        if (altNameSuggestions.length && segInfos && segInfos.length) {
+            const segName = segInfos[0].streetName;
+            altNameSuggestions.forEach((c) => {
+                const { cityName } = (() => {
+                    try {
+                        return altCandidateCity(c, consensusCity, segInfos[0]);
+                    } catch {
+                        return { cityName: null };
+                    }
+                })();
+                const label = `${titleCaseName(c.name)}${cityName ? `, ${cityName}` : ''}`;
+                const box = document.createElement('div');
+                box.style.cssText = 'margin:6px 0;padding:7px 9px;background:#eef3ff;border-left:3px solid #4a6fd0;border-radius:4px;font-size:11px;color:#1c2c5e;';
+                const txt = document.createElement('div');
+                txt.innerHTML = `🔀 <b>GIS uses another name here.</b> ${c.count} GIS address(es) along the selection read `
+                    + `<b>"${titleCaseName(c.name)}"</b> (segment: <b>"${segName}"</b>, not in its alternates; no road of that name drawn nearby).`;
+                const btn = document.createElement('button');
+                btn.textContent = `Add alt "${label}" + rescan`;
+                btn.title = 'Add this name as an ALTERNATE street on the selected segment(s) (unsaved), then rescan so its house numbers become addable. The primary name and city are not touched.';
+                btn.style.cssText = 'margin-top:5px;padding:4px 9px;background:#4a6fd0;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:11px;';
+                btn.addEventListener('click', () => {
+                    const res = addGisAltName(c, segInfos, consensusCity);
+                    if (res.ok) {
+                        btn.remove();
+                        txt.innerHTML = `✓ alt <b>"${res.altName}${res.cityName ? `, ${res.cityName}` : ''}"</b> added (unsaved) — rescanning…`;
+                        hnScanSelected().catch((e) => setHnStatus(`✗ Rescan failed: ${e.message}`, '#c00'));
+                    } else {
+                        txt.innerHTML = `✗ add alt failed: ${res.err}`;
+                        txt.style.color = '#c00';
+                    }
+                });
+                box.appendChild(txt);
+                box.appendChild(btn);
+                hnResultsRef.appendChild(box);
+            });
+        }
+        // City repair (v.35, Josh's #3): GIS consensus city + any city-less
+        // primary/alt on the selection → one reviewed Apply. Never touches the
+        // primary's city slot.
+        if (consensusCity && segInfos && segInfos.length) {
+            const plans = segInfos.map((si) => planCityRepair(si, consensusCity)).filter(Boolean);
+            if (plans.length) {
+                const box = document.createElement('div');
+                box.style.cssText = 'margin:6px 0;padding:7px 9px;background:#eafaef;border-left:3px solid #0a7;border-radius:4px;font-size:11px;color:#0c4028;';
+                const txt = document.createElement('div');
+                txt.innerHTML = `🏙️ <b>City repair — GIS consensus: ${consensusCity}.</b><br>`
+                    + plans.map((p) => `seg ${p.si.id} (“${p.si.streetName}”): ${p.actions.join(' · ')}`).join('<br>');
+                const btn = document.createElement('button');
+                btn.textContent = `Apply city repair (${plans.length} segment${plans.length > 1 ? 's' : ''})`;
+                btn.title = 'Add the name+city alternates and drop the superseded city-less alternates (unsaved until you save in WME). The primary city slot is never changed.';
+                btn.style.cssText = 'margin-top:5px;padding:4px 9px;background:#0a7;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:11px;';
+                btn.addEventListener('click', () => {
+                    const fails = [];
+                    let done = 0;
+                    for (const p of plans) {
+                        const res = applyCityRepair(p);
+                        if (res.ok) {
+                            done++;
+                        } else {
+                            fails.push(`seg ${p.si.id}: ${res.err}`);
+                        }
+                    }
+                    if (fails.length) {
+                        txt.innerHTML = `✗ city repair — ${done} ok, ${fails.length} failed:<br>${fails.join('<br>')}`;
+                        txt.style.color = '#c00';
+                    } else {
+                        btn.remove();
+                        txt.innerHTML = `✓ city repair applied to ${done} segment(s) — UNSAVED until you save in WME.`;
+                    }
+                });
+                box.appendChild(txt);
+                box.appendChild(btn);
+                hnResultsRef.appendChild(box);
+            }
         }
         if (missing.length) {
             hnResultsRef.appendChild(makeSectionHeader('MISSING — in GIS, not on the map:'));

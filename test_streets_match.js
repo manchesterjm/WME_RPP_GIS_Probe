@@ -62,6 +62,16 @@ const cases = [
     ['Talon Loop', 'TALON', true],                   // GIS bare form, one-sided strip
     ['Talon Loop', 'TALON TRL', false],              // conflicting types still refuse
     ['Highway View Dr', 'HIGHWAY VIEW DR', true],    // route words inside a real name: untouched
+    // Directional-prefixed routes (2026-07-24, Berthoud W CR-4 — closes the
+    // old "E County Road 30 passes through unrouted" gap):
+    ['W CR-4', 'W COUNTY ROAD 4', true],
+    ['W CR-4', 'WEST COUNTY ROAD 4', true],          // spelled-out directional
+    ['W CR-4', 'COUNTY ROAD 4', true],               // one-sided directional ignored
+    ['E County Road 30', 'CR-30', true],             // the documented gap case itself
+    ['W CR-4', 'COUNTY ROAD 4 W', true],             // trailing directional, position-blind
+    ['W CR-4', 'E COUNTY ROAD 4', false],            // conflicting directionals refuse
+    ['W CR-4', 'W COUNTY ROAD 5', false],            // different numbers still refuse
+    ['N Highway View Dr', 'N HIGHWAY VIEW DR', true],// dir + route words inside a real name: untouched
     // Cardinal directionals (2026-07-21, Josh: translate + one-sided ignore):
     ['E Woodmen Rd', 'WOODMEN RD', true],            // FLIPPED from the old intentional gap: one-sided dir ignored
     ['E Woodmen Rd', 'EAST WOODMEN RD', true],       // spelled-out translator
