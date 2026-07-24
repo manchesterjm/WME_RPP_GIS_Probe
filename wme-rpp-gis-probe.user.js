@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.24.37';
+    const SCRIPT_VERSION = '2026.07.24.38';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -1944,8 +1944,11 @@
             // normalized name → {name, count, cities}.
             const altNameCands = new Map();
             // GIS city tally over matched on-street points → consensus city
-            // for the city-repair action (v.35, Josh's #3).
+            // for the city-repair action (v.35, Josh's #3). v.38: junk cities
+            // ("UNINCORPORATED") never count; ZIPs are tallied alongside so a
+            // no-usable-city area can fall back to the mailing city.
             const cityTally = new Map();
+            const zipTally = new Map();
             // Add-key = target STREET + house number (v.31): WME house numbers
             // are unique PER STREET, so two GIS records for the same house —
             // even with different street spellings the GIS-side streetCore key
@@ -2034,8 +2037,9 @@
                         c.count++;
                         c.minDist = Math.min(c.minDist, dSel);
                         c.maxDist = Math.max(c.maxDist, dSel);
-                        if (p.city) {
-                            c.cities.set(p.city, (c.cities.get(p.city) || 0) + 1);
+                        const candCity = usableGisCity(p.city);
+                        if (candCity) {
+                            c.cities.set(candCity, (c.cities.get(candCity) || 0) + 1);
                         }
                         altNameCands.set(key, c);
                     }
@@ -2046,8 +2050,13 @@
                     }
                     continue;
                 }
-                if (p.city) {
-                    cityTally.set(p.city, (cityTally.get(p.city) || 0) + 1);
+                const goodCity = usableGisCity(p.city);
+                if (goodCity) {
+                    cityTally.set(goodCity, (cityTally.get(goodCity) || 0) + 1);
+                }
+                const zip5 = String(p.zip || '').trim().slice(0, 5);
+                if (/^\d{5}$/.test(zip5)) {
+                    zipTally.set(zip5, (zipTally.get(zip5) || 0) + 1);
                 }
                 const norm = normHn(p.hn);
                 if (rppNums.has(norm)) {
@@ -2112,11 +2121,22 @@
             // GIS consensus city along the selection (v.35, Josh's ruling
             // 2026-07-24) — feeds the city-repair action and new alts' cities.
             // The city NEVER touches the primary slot (city-boundary skew rule).
-            const consensusCity = [...cityTally.entries()].sort((a, b) => b[1] - a[1])
+            // v.38: junk cities never reach the tally; if GIS offers NO usable
+            // city, the majority ZIP's preferred mailing city decides.
+            let consensusCity = [...cityTally.entries()].sort((a, b) => b[1] - a[1])
                 .map(([name]) => titleCaseName(name))[0] || null;
+            let consensusVia = 'GIS';
+            if (!consensusCity && zipTally.size) {
+                const zip = [...zipTally.entries()].sort((a, b) => b[1] - a[1])[0][0];
+                const preferred = (await fetchZipCityData())?.zips?.[zip]?.preferred;
+                if (preferred) {
+                    consensusCity = titleCaseName(preferred);
+                    consensusVia = `ZIP ${zip}`;
+                }
+            }
 
             renderHnResults(missing, mismatch, renameSuggestions, segInfos,
-                { altNameSuggestions, consensusCity });
+                { altNameSuggestions, consensusCity, consensusVia });
             setHnScanning(false);
             const at = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
             const streets = [...new Set(segInfos.map((s) => s.streetName))].join(', ');
@@ -2311,7 +2331,61 @@
 
     // ---- alt-name + city writes (v.35 — reviewed, save-stack edits) ----------
 
+    // GIS "city" values that must never become a WME city (v.38 — the
+    // statewide composite AND Boulder both label rural points literally
+    // "UNINCORPORATED", and the v.36 city repair faithfully wrote that onto
+    // N 83rd St; Josh: "that is a no no"). Junk counts as NO city everywhere:
+    // never a consensus, and an alt carrying it is treated as CITY-LESS (so
+    // the repair upgrades it to the real city and drops it).
+    const JUNK_CITY_RE = /UNINCORP/i;
+
+    function usableGisCity(raw) {
+        const s = String(raw || '').trim();
+        return (s && !JUNK_CITY_RE.test(s)) ? s : null;
+    }
+
+    // ZIP → preferred-city fallback (v.38): where GIS has no usable city at
+    // all ("UNINCORPORATED" country), the mailing city from the RPP fixer's
+    // published wme-zip-city-data decides (80503 → LONGMONT). Fetched once,
+    // cached 7 days in localStorage like the fixer does.
+    const ZIP_CITY_URL = 'https://raw.githubusercontent.com/manchesterjm/wme-zip-city-data/main/co_zip_cities.json';
+    const ZIP_CITY_STORE = 'hnFiller.zipCityData';
+    const ZIP_CITY_TTL_MS = 7 * 24 * 3600 * 1000;
+    let zipCityData = null;
+
+    function fetchZipCityData() {
+        if (zipCityData) {
+            return Promise.resolve(zipCityData);
+        }
+        try {
+            const cached = JSON.parse(localStorage.getItem(ZIP_CITY_STORE) || 'null');
+            if (cached && cached.data && Date.now() - cached.t < ZIP_CITY_TTL_MS) {
+                zipCityData = cached.data;
+                return Promise.resolve(zipCityData);
+            }
+        } catch { /* cache unreadable — refetch */ }
+        return new Promise((resolve) => {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: ZIP_CITY_URL,
+                timeout: 15000,
+                onload: (res) => {
+                    try {
+                        zipCityData = JSON.parse(res.responseText);
+                        localStorage.setItem(ZIP_CITY_STORE, JSON.stringify({ t: Date.now(), data: zipCityData }));
+                    } catch { /* leave null — caller degrades to no-consensus */ }
+                    resolve(zipCityData);
+                },
+                onerror: () => resolve(null),
+                ontimeout: () => resolve(null),
+            });
+        });
+    }
+
     function ensureCity(cityName) {
+        if (JUNK_CITY_RE.test(cityName)) {
+            throw new Error(`refusing to write junk city "${cityName}"`);
+        }
         return wmeSdk.DataModel.Cities.getCity({ cityName })
             || wmeSdk.DataModel.Cities.addCity({ cityName });
     }
@@ -2384,7 +2458,9 @@
             return null;
         }
         const primaryName = addr?.street?.name || '';
-        const primaryHasCity = !!(addr?.city && !addr.city.isEmpty && addr.city.name);
+        // Junk cities ("Unincorporated") count as NO city (v.38) — both here
+        // and in the covered test below.
+        const primaryHasCity = !!usableGisCity((addr?.city && !addr.city.isEmpty && addr.city.name) || '');
         const alts = addr?.altStreets || [];
         if (alts.some((a) => a?.street?.id == null)) {
             return null;   // can't rebuild the alt list faithfully — leave manual
@@ -2393,17 +2469,19 @@
         const keep = [];
         for (const a of alts) {
             const altName = a.street.name || '';
-            const altCity = (a.city && !a.city.isEmpty && a.city.name) || '';
+            const rawAltCity = (a.city && !a.city.isEmpty && a.city.name) || '';
+            const altCity = usableGisCity(rawAltCity);
             if (altCity || !altName) {
                 keep.push(a.street.id);
                 continue;
             }
-            actions.push(`upgrade “${altName}” → “${altName}, ${cityName}” (drop the city-less alt)`);
+            const shown = rawAltCity ? `${altName}, ${rawAltCity}` : altName;
+            actions.push(`upgrade “${shown}” → “${altName}, ${cityName}” (drop the ${rawAltCity ? 'junk-city' : 'city-less'} alt)`);
             keep.push({ needStreet: altName });
         }
         if (!primaryHasCity && primaryName) {
             const covered = alts.some((a) => {
-                const altCity = (a.city && !a.city.isEmpty && a.city.name) || '';
+                const altCity = usableGisCity((a.city && !a.city.isEmpty && a.city.name) || '');
                 return altCity && a.street.name
                     && normalizeStreet(a.street.name) === normalizeStreet(primaryName);
             });
@@ -2453,7 +2531,7 @@
         if (!hnResultsRef) {
             return;
         }
-        const { altNameSuggestions = [], consensusCity = null } = extra || {};
+        const { altNameSuggestions = [], consensusCity = null, consensusVia = 'GIS' } = extra || {};
         hnResultsRef.innerHTML = '';
         hnPendingRows = [];
         if (hnAddAllRef) {
@@ -2524,7 +2602,7 @@
                 const box = document.createElement('div');
                 box.style.cssText = 'margin:6px 0;padding:7px 9px;background:#eafaef;border-left:3px solid #0a7;border-radius:4px;font-size:11px;color:#0c4028;';
                 const txt = document.createElement('div');
-                txt.innerHTML = `🏙️ <b>City repair — GIS consensus: ${consensusCity}.</b><br>`
+                txt.innerHTML = `🏙️ <b>City repair — consensus: ${consensusCity}</b> (via ${consensusVia}).<br>`
                     + plans.map((p) => `seg ${p.si.id} (“${p.si.streetName}”): ${p.actions.join(' · ')}`).join('<br>');
                 const btn = document.createElement('button');
                 btn.textContent = `Apply city repair (${plans.length} segment${plans.length > 1 ? 's' : ''})`;
