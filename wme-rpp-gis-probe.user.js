@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.24.38';
+    const SCRIPT_VERSION = '2026.07.24.39';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -1707,6 +1707,17 @@
         return false;
     }
 
+    // Does the selection already CARRY this GIS spelling verbatim (as primary
+    // or any alt)? "Verbatim" = equal after normalization (canonical or
+    // raw-squashed), NOT the fuzzy streetsMatch — "CR-2" matches GIS
+    // "W COUNTY ROAD 2" but does not CARRY it (v.39).
+    function selectionCarriesSpelling(segInfos, gisStreet) {
+        const canon = normalizeStreet(gisStreet);
+        const raw = normalizeStreetRaw(gisStreet).replace(/ /g, '');
+        return segInfos.some((si) => [si.streetName, ...(si.altNames || [])].some((n) =>
+            normalizeStreet(n) === canon || normalizeStreetRaw(n).replace(/ /g, '') === raw));
+    }
+
     // A loaded segment ANYWHERE in the model (however far — the model keeps
     // everything panned across) uses a street of this name as its PRIMARY →
     // it's a real road somewhere, not an alias of the selection (v.36 guard).
@@ -1943,6 +1954,12 @@
             // (different core) — candidate ALTERNATE names (v.35, Josh's #2):
             // normalized name → {name, count, cities}.
             const altNameCands = new Map();
+            // MATCHED points whose GIS spelling the selection doesn't carry
+            // verbatim (v.39 — CR-2 field case: GIS "W COUNTY ROAD 2" route-
+            // matches primary "CR-2", so it never reached the alias machinery,
+            // but the segment should also CARRY that name as an alt).
+            const spellCands = new Map();
+            let matchedInCorridor = 0;
             // GIS city tally over matched on-street points → consensus city
             // for the city-repair action (v.35, Josh's #3). v.38: junk cities
             // ("UNINCORPORATED") never count; ZIPs are tallied alongside so a
@@ -2058,6 +2075,17 @@
                 if (/^\d{5}$/.test(zip5)) {
                     zipTally.set(zip5, (zipTally.get(zip5) || 0) + 1);
                 }
+                matchedInCorridor++;
+                if (p.street && !selectionCarriesSpelling(segInfos, p.street)) {
+                    const key = normalizeStreet(p.street);
+                    const c = spellCands.get(key) || { name: p.street, norm: key, count: 0, cities: new Map() };
+                    c.count++;
+                    const spellCity = usableGisCity(p.city);
+                    if (spellCity) {
+                        c.cities.set(spellCity, (c.cities.get(spellCity) || 0) + 1);
+                    }
+                    spellCands.set(key, c);
+                }
                 const norm = normHn(p.hn);
                 if (rppNums.has(norm)) {
                     rppCoveredCount++;   // an RPP outranks a segment HN — never propose
@@ -2116,7 +2144,17 @@
                     && c.minDist <= aliasCurbM
                     && !streetNameIsPrimarySomewhere(c.name)
                     && !otherSegs.some((os) => os.street && streetsMatch(os.street, c.name)))
-                .sort((a, b) => b.count - a.count);
+                .sort((a, b) => b.count - a.count)
+                .map((c) => ({ ...c, kind: 'alias' }));
+            // Matched-spelling suggestions (v.39): the GIS name matched the
+            // selection, so no alias guards apply — just require it to be the
+            // majority spelling among matched points (a lone oddball record
+            // shouldn't nag).
+            const spellingSuggestions = [...spellCands.values()]
+                .filter((c) => c.count >= 1 && c.count * 2 >= matchedInCorridor)
+                .sort((a, b) => b.count - a.count)
+                .map((c) => ({ ...c, kind: 'spelling', matchedTotal: matchedInCorridor }));
+            altNameSuggestions.push(...spellingSuggestions);
 
             // GIS consensus city along the selection (v.35, Josh's ruling
             // 2026-07-24) — feeds the city-repair action and new alts' cities.
@@ -2570,9 +2608,15 @@
                 const box = document.createElement('div');
                 box.style.cssText = 'margin:6px 0;padding:7px 9px;background:#eef3ff;border-left:3px solid #4a6fd0;border-radius:4px;font-size:11px;color:#1c2c5e;';
                 const txt = document.createElement('div');
-                txt.innerHTML = `🔀 <b>GIS uses another name here.</b> ${c.count} GIS address(es) along the selection read `
-                    + `<b>"${titleCaseName(c.name)}"</b>, ${Math.round(c.minDist)}–${Math.round(c.maxDist)}m from the road `
-                    + `(segment: <b>"${segName}"</b>, not in its alternates; no road of that name known to the map).`;
+                if (c.kind === 'spelling') {
+                    txt.innerHTML = `🔤 <b>GIS spells this road differently.</b> ${c.count} of ${c.matchedTotal} matched `
+                        + `address point(s) here read <b>"${titleCaseName(c.name)}"</b> — it matches <b>"${segName}"</b> `
+                        + 'but the segment does not carry that name as primary or alternate.';
+                } else {
+                    txt.innerHTML = `🔀 <b>GIS uses another name here.</b> ${c.count} GIS address(es) along the selection read `
+                        + `<b>"${titleCaseName(c.name)}"</b>, ${Math.round(c.minDist)}–${Math.round(c.maxDist)}m from the road `
+                        + `(segment: <b>"${segName}"</b>, not in its alternates; no road of that name known to the map).`;
+                }
                 const btn = document.createElement('button');
                 btn.textContent = `Add alt "${label}" + rescan`;
                 btn.title = 'Add this name as an ALTERNATE street on the selected segment(s) (unsaved), then rescan so its house numbers become addable. The primary name and city are not touched.';
