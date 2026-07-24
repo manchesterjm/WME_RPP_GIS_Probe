@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.24.41';
+    const SCRIPT_VERSION = '2026.07.24.42';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -1751,6 +1751,33 @@
             normalizeStreet(n) === canon || normalizeStreetRaw(n).replace(/ /g, '') === raw));
     }
 
+    // The name is carried as an ALTERNATE street on some loaded segment —
+    // POSITIVE evidence it's a real alias in this area. v.42: the actionable
+    // "Add alt" is offered ONLY with this corroboration. "No drawn road has
+    // this name" proved to be evidence of an UNDRAWN side road, not of an
+    // alias (Josh field report 2026-07-24) — those are now report-only.
+    function streetNameIsAltSomewhere(name) {
+        const stObjs = (W && W.model && W.model.streets && W.model.streets.objects) ? W.model.streets.objects : {};
+        const matchIds = new Set();
+        for (const k in stObjs) {
+            const known = stObjs[k].attributes ? stObjs[k].attributes.name : null;
+            if (known && streetsMatch(known, name)) {
+                matchIds.add(stObjs[k].attributes.id);
+            }
+        }
+        if (!matchIds.size) {
+            return false;
+        }
+        const segObjs = (W && W.model && W.model.segments && W.model.segments.objects) ? W.model.segments.objects : {};
+        for (const sid in segObjs) {
+            const alts = (segObjs[sid].attributes && segObjs[sid].attributes.streetIDs) || [];
+            if (alts.some((x) => matchIds.has(x))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     // A loaded segment ANYWHERE in the model (however far — the model keeps
     // everything panned across) uses a street of this name as its PRIMARY →
     // it's a real road somewhere, not an alias of the selection (v.36 guard).
@@ -2085,7 +2112,11 @@
                             name: p.street, norm: key, count: 0, cities: new Map(), minDist: Infinity, maxDist: 0,
                         };
                         c.count++;
-                        c.minDist = Math.min(c.minDist, dSel);
+                        if (dSel < c.minDist) {
+                            c.minDist = dSel;
+                            c.nearLon = p.lon;
+                            c.nearLat = p.lat;
+                        }
                         c.maxDist = Math.max(c.maxDist, dSel);
                         const candCity = usableGisCity(p.city);
                         if (candCity) {
@@ -2172,13 +2203,20 @@
             //   WHOLE loaded street model (not just drawn-in-view segments);
             //   and no drawn road in view named that.
             const aliasCurbM = Math.min(corridor, HN_CONFIG.corridorM);
-            const altNameSuggestions = [...altNameCands.values()]
+            // v.42 split: an unmatched name is only ACTIONABLE (Add-alt
+            // button) when some loaded segment already carries it as an
+            // ALTERNATE — positive evidence of a real alias. Without that,
+            // the likeliest truth is an UNDRAWN side road → report-only.
+            const aliasBase = [...altNameCands.values()]
                 .filter((c) => c.count >= 2
                     && c.minDist <= aliasCurbM
                     && !streetNameIsPrimarySomewhere(c.name)
                     && !otherSegs.some((os) => os.street && streetsMatch(os.street, c.name)))
                 .sort((a, b) => b.count - a.count)
+                .map((c) => ({ ...c, corroborated: streetNameIsAltSomewhere(c.name) }));
+            const altNameSuggestions = aliasBase.filter((c) => c.corroborated)
                 .map((c) => ({ ...c, kind: 'alias' }));
+            const aliasReports = aliasBase.filter((c) => !c.corroborated);
             // Matched-spelling suggestions (v.39): the GIS name matched the
             // selection, so no alias guards apply — just require it to be the
             // majority spelling among matched points (a lone oddball record
@@ -2207,7 +2245,7 @@
             }
 
             renderHnResults(missing, mismatch, renameSuggestions, segInfos,
-                { altNameSuggestions, consensusCity, consensusVia });
+                { altNameSuggestions, aliasReports, consensusCity, consensusVia });
             setHnScanning(false);
             const at = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
             const streets = [...new Set(segInfos.map((s) => s.streetName))].join(', ');
@@ -2607,7 +2645,7 @@
         if (!hnResultsRef) {
             return;
         }
-        const { altNameSuggestions = [], consensusCity = null, consensusVia = 'GIS' } = extra || {};
+        const { altNameSuggestions = [], aliasReports = [], consensusCity = null, consensusVia = 'GIS' } = extra || {};
         hnResultsRef.innerHTML = '';
         hnPendingRows = [];
         if (hnAddAllRef) {
@@ -2672,6 +2710,26 @@
                 });
                 box.appendChild(txt);
                 box.appendChild(btn);
+                hnResultsRef.appendChild(box);
+            });
+        }
+        // Uncorroborated unmatched names (v.42): REPORT-ONLY — likely an
+        // undrawn side road, never an add path.
+        if (aliasReports.length && segInfos && segInfos.length) {
+            const segName = segInfos[0].streetName;
+            aliasReports.forEach((c) => {
+                const box = document.createElement('div');
+                box.style.cssText = 'margin:6px 0;padding:7px 9px;background:#fff6e5;border-left:3px solid #e8a300;border-radius:4px;font-size:11px;color:#663c00;display:flex;align-items:center;gap:8px;';
+                const txt = document.createElement('div');
+                txt.style.cssText = 'flex:1;';
+                txt.innerHTML = `⚠️ <b>Unknown road name in GIS — not added.</b> ${c.count} address(es) here read `
+                    + `<b>"${titleCaseName(c.name)}"</b> (${Math.round(c.minDist)}–${Math.round(c.maxDist)}m from `
+                    + `"${segName}"), but no drawn road or alternate anywhere carries that name. Most likely an `
+                    + 'UNDRAWN side road — eyeball it (Go), and draw it or add the alt yourself if it truly is this road.';
+                box.appendChild(txt);
+                if (c.nearLon != null && c.nearLat != null) {
+                    box.appendChild(makeGoButton(c.nearLon, c.nearLat));
+                }
                 hnResultsRef.appendChild(box);
             });
         }
