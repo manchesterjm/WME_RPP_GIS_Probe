@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.24.40';
+    const SCRIPT_VERSION = '2026.07.24.41';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -1555,7 +1555,15 @@
                 // neighboring county's addressing and live in the statewide
                 // composite only. If NOTHING street-matches the selection,
                 // pull statewide too and merge (deduped by street+HN).
-                const anyOnStreet = local.points.some((p) => segInfos.some((si) => si.match(p.street)));
+                // v.41: the test must use the CLASSIFIER's semantics — in
+                // view AND in corridor AND matching. An off-screen County
+                // Line Rd point miles along suppressed the merge while the
+                // scan honestly reported 0 on-street (2nd CR-2 field round).
+                const corridorNow = hnCorridorM();
+                const anyOnStreet = local.points.some((p) =>
+                    (!scanBbox || coordInBbox(p.lon, p.lat, scanBbox))
+                    && segInfos.some((si) => si.match(p.street)
+                        && metersToLine(p.lon, p.lat, si.line) <= corridorNow));
                 if (anyOnStreet) {
                     return { error: null, points: local.points, source: requestedLocal, usedFallback: false };
                 }
