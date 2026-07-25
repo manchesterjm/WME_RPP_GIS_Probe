@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.24.42';
+    const SCRIPT_VERSION = '2026.07.25.43';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -65,8 +65,10 @@
         name: 'State of Colorado — Public Address Composite',
         url: 'https://gis.colorado.gov/public/rest/services/Address_and_Parcel/Colorado_Public_Addresses/MapServer/0/query',
         fields: (a) => ({
-            // Some counties zero-pad AddrNum (Summit "0967") — emit plain.
-            hn: String(a.AddrNum ?? '').trim().replace(/^0+(?=\d)/, ''),
+            // Some counties zero-pad AddrNum (Summit "0967") — emit plain. Others
+            // leave AddrNum NULL with the number only inside AddrFull (Bayfield /
+            // La Plata, 2026-07-25) — composeHn reads it back out of the string.
+            hn: composeHn(a.AddrNum, a.AddrFull),
             street: composeStreet(a),
             address: a.AddrFull || '',
             city: a.PlaceName || '',
@@ -378,6 +380,31 @@
                 city: a.MCN || '',
                 zip: a.ZIPCODE || '',
                 subtype: a.STRUCTURE || '',
+            }),
+        },
+        {
+            id: 'laplata',
+            name: 'La Plata County',
+            // ⚠️ HOST MOVED: the WME GIS Layers sheet still lists
+            // gis.laplata.co.us, which 301s to gis.lpcgov.org (verified
+            // 2026-07-25) — same upstream-staleness class as the dead Douglas
+            // URL. Use the new host directly; the loader @connects it.
+            // Layer 84 "Address Numbers", native wkid 2233 (State Plane) —
+            // queryOneSource passes inSR=outSR=4326 so it reprojects server-side.
+            // ADDR_HN and SITE_UNIT are frequently NULL and SITE_ST carries the
+            // street WITHOUT its type ("Wild Horse"), so the whole address is
+            // really only in PROPERTY_A ("111 Wild Horse Dr") — composeHn reads
+            // the number back out of it, and streetsMatch's one-sided type strip
+            // already accepts a type-less source name.
+            url: 'https://gis.lpcgov.org/arcgis/rest/services/JS_website/Map_Pro/MapServer/84/query',
+            bbox: [-108.312, 36.9856, -107.4582, 37.6413],
+            fields: (a) => ({
+                hn: composeHn(a.ADDR_HN, a.PROPERTY_A),
+                street: a.SITE_ST || composeStreetFromFull(a.PROPERTY_A),
+                address: a.PROPERTY_A || '',
+                city: a.City || '',
+                zip: a.ZIP || '',
+                subtype: a.SITE_UNIT || '',
             }),
         },
     ];
@@ -882,6 +909,35 @@
         return parts.map((p) => (p == null ? '' : String(p).trim())).filter(Boolean).join(' ');
     }
 
+    // The leading house-number token of a full address string ("110 Wild Horse
+    // Dr", "0967 Beeler PL", "123B 1/2 Main St"). ONE definition, captured, used
+    // BOTH to strip the number off a full address (composeStreet) and to read it
+    // back out (composeHn) — they must never drift apart.
+    const LEADING_HN_RE = /^(\d+[A-Za-z]?(?:\s+(?:1\/2|½))?)\s+/;
+
+    // Drop a source's zero padding ("0967" → "967"); leaves "0" alone.
+    function plainHn(value) {
+        return String(value ?? '').trim().replace(/^0+(?=\d)/, '');
+    }
+
+    // House number from a source's dedicated HN column, falling back to the
+    // leading token of its full-address column.
+    // ⚠️ 2026-07-25 (Wild Horse Dr, Bayfield / La Plata): some records populate
+    // NEITHER a dedicated HN column NOR the split street columns — the entire
+    // address lives in one string. v.34 gave composeStreet an AddrFull fallback
+    // but gave the HN none, so those points resolved to a correct street with an
+    // EMPTY hn and silently produced nothing to offer. La Plata's own service
+    // does the same thing (ADDR_HN null, address only in PROPERTY_A), so this is
+    // a source pattern, not one bad table.
+    function composeHn(dedicated, fullAddress) {
+        const direct = plainHn(dedicated);
+        if (direct) {
+            return direct;
+        }
+        const match = LEADING_HN_RE.exec(String(fullAddress ?? '').trim());
+        return match ? plainHn(match[1]) : '';
+    }
+
     // The statewide composite's component column names. Some counties publish
     // NULL components with the street only inside AddrFull (Summit, found
     // 2026-07-22: "0967 Beeler PL (CR 1194)" — zero-padded HN + parenthetical
@@ -889,21 +945,26 @@
     // "(...)" alias, strip the leading house-number token, and if nothing is
     // left the alias itself IS the street ("0050 CR 1201"-style records keep
     // "CR 1201" via the normal strip).
-    function composeStreet(a) {
-        const joined = joinStreet([a.PreDir, a.PreType, a.StreetName, a.PostType, a.PostDir]);
-        if (joined) {
-            return joined;
-        }
-        const full = String(a.AddrFull ?? '').trim();
+    // The street half of a one-string address: drop a trailing "(...)" alias and
+    // the leading house number. If that leaves nothing, the alias itself IS the
+    // street. Shared by the statewide composite and any local source that only
+    // publishes a full-address column (La Plata's PROPERTY_A).
+    function composeStreetFromFull(fullAddress) {
+        const full = String(fullAddress ?? '').trim();
         if (!full) {
             return '';
         }
         const alias = (full.match(/\(([^)]+)\)\s*$/) || [])[1] || '';
         const street = full
             .replace(/\s*\([^)]*\)\s*$/, '')
-            .replace(/^\d+[A-Za-z]?(?:\s+(?:1\/2|½))?\s+/, '')
+            .replace(LEADING_HN_RE, '')
             .trim();
         return street || alias.trim();
+    }
+
+    function composeStreet(a) {
+        const joined = joinStreet([a.PreDir, a.PreType, a.StreetName, a.PostType, a.PostDir]);
+        return joined || composeStreetFromFull(a.AddrFull);
     }
 
     // Query ONE source's address-point service around (lon,lat). Resolves to
