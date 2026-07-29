@@ -5,6 +5,8 @@
 // @description  RPP vs Colorado authoritative GIS (LOCAL-first: 15 county sources + statewide last-resort fallback): flags misplaced pins, wrong/typo'd streets, and bad house numbers in a "🔬 Probe" side-panel tab (reviewed one-click "Snap"), PLUS a "🔢 HN" tab that adds house numbers missing from selected road segments, from the same GIS points (reviewed per-row "Add" + Add-all, unsaved until you save in WME).
 // @match        https://www.waze.com/*editor*
 // @match        https://beta.waze.com/*editor*
+// @updateURL    https://raw.githubusercontent.com/manchesterjm/WME_RPP_GIS_Probe/master/wme-rpp-gis-probe-loader.user.js
+// @downloadURL  https://raw.githubusercontent.com/manchesterjm/WME_RPP_GIS_Probe/master/wme-rpp-gis-probe-loader.user.js
 // @require      https://cdn.jsdelivr.net/npm/@turf/turf@7/turf.min.js
 // @require      https://raw.githubusercontent.com/manchesterjm/WME_RPP_GIS_Probe/master/wme-rpp-gis-probe.user.js?v=2026.07.29.44
 // @grant        GM_xmlhttpRequest
