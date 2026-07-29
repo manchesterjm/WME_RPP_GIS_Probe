@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.25.43';
+    const SCRIPT_VERSION = '2026.07.29.44';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -211,24 +211,22 @@
                 subtype: a.AddressType || '',
             }),
         },
-        {
-            id: 'adams',
-            name: 'Adams County',
-            // ⚠️ Cloudflare-challenged to plain curl — schema from the GIS Layers
-            // sheet (label field ADDR_FULL), NOT live-probed. bbox ≈ county
-            // bounds. If the challenge also blocks GM_xmlhttpRequest, the
-            // error/empty fallback rides statewide as before.
-            url: 'https://gisapp.adcogov.org/arcgis/rest/services/AdamsCountyBasic/MapServer/32/query',
-            bbox: [-105.053, 39.738, -103.706, 40.003],
-            fields: (a) => ({
-                hn: String(a.ADDR_FULL || '').trim().split(' ')[0],
-                street: String(a.ADDR_FULL || '').trim().split(' ').slice(1).join(' '),
-                address: a.ADDR_FULL || '',
-                city: '',
-                zip: '',
-                subtype: '',
-            }),
-        },
+        // ⛔ ADAMS COUNTY — REMOVED as a local source 2026-07-29, rides statewide.
+        // gisapp.adcogov.org is CLOUDFLARE-GATED: verified live this session, the
+        // endpoint returns HTTP 403 "Just a moment..." (an interstitial challenge
+        // page, not JSON). It was added unverified on 2026-07-21 with the schema
+        // guessed from the GIS Layers sheet and was never once live-probed, so it
+        // has never returned a usable record. Keeping it registered only made the
+        // registry claim coverage it does not have. Statewide has good Adams data
+        // (checked at 39.760,-104.830 → County="Adams", Vaughn St points), so
+        // statewide IS the correct source here — same disposition as the other
+        // dead-upstream counties (Delta, Montrose, Rio Blanco, Gilpin, Teller,
+        // Park, Sedgwick, Commerce City).
+        // To revive: prove `curl` gets JSON (not a challenge) from
+        // https://gisapp.adcogov.org/arcgis/rest/services/AdamsCountyBasic/MapServer/32/query
+        // AND that GM_xmlhttpRequest does too, THEN re-probe the real field names
+        // — the old ADDR_FULL split-on-space mapper was a guess and would not
+        // survive the AddrFull edge cases composeHn/composeStreetFromFull handle.
         {
             id: 'montezuma',
             name: 'Montezuma County',
@@ -1175,9 +1173,31 @@
             let { error, points } = await queryOneSource(activeSource, info.lon, info.lat, CONFIG.queryRadiusM);
             if (error && activeSource.id !== STATEWIDE_SOURCE.id) {
                 console.warn(`${LOG} ${activeSource.name} failed (${error}) → falling back to ${STATEWIDE_SOURCE.name} for the rest of this scan.`);
-                usedFallback = true;
+                usedFallback = 'error';
                 activeSource = STATEWIDE_SOURCE;
                 ({ error, points } = await queryOneSource(activeSource, info.lon, info.lat, CONFIG.queryRadiusM));
+            } else if (!error && !points.length && activeSource.id !== STATEWIDE_SOURCE.id) {
+                // v.44 COVERAGE-HOLE FALLBACK (Adams/Arapahoe field case).
+                // A local bbox is a RECTANGLE, so it can legitimately claim a
+                // neighbouring county the service holds no data for: Arapahoe's
+                // bbox reaches 39.787 — its service's OWN reported data extent —
+                // while its data stops at the Colfax county line (~39.74).
+                // Every Adams RPP in that 39.738-39.787 band queried Arapahoe,
+                // got zero **with no error**, and the old error-only fallback
+                // left the scan pinned to Arapahoe reporting no-gis for all.
+                // Tightening the bbox is NOT the fix — no rectangle can follow
+                // a county line, so this must be handled at query time.
+                // ⚠️ Zero alone is NOT proof of a hole: a genuinely empty rural
+                // spot must stay no-gis and must NOT flip the source for the
+                // rest of the scan. So prove it — only switch when statewide
+                // actually HAS points here.
+                const stateProbe = await queryOneSource(STATEWIDE_SOURCE, info.lon, info.lat, CONFIG.queryRadiusM);
+                if (!stateProbe.error && stateProbe.points.length) {
+                    console.warn(`${LOG} ${activeSource.name} returned 0 points where ${STATEWIDE_SOURCE.name} has ${stateProbe.points.length} → coverage hole; falling back to ${STATEWIDE_SOURCE.name} for the rest of this scan.`);
+                    usedFallback = 'coverage';
+                    activeSource = STATEWIDE_SOURCE;
+                    points = stateProbe.points;
+                }
             }
             if (error) {
                 console.warn(`GIS query error: ${error}`);
@@ -1241,7 +1261,14 @@
         // statewide-because-no-local-configured.
         let srcDesc;
         if (usedFallback) {
-            srcDesc = `🗺️ ${STATEWIDE_SOURCE.name} — <b>fallback</b> (${requestedLocal.name} unavailable) · ${sourceHost(STATEWIDE_SOURCE)}`;
+            // v.44: name the REASON — "unavailable" was a lie for a coverage
+            // hole (the service was healthy, it just has no data on this side
+            // of the county line), and that wording would send the next
+            // investigation after a non-existent outage.
+            const why = usedFallback === 'coverage'
+                ? `${requestedLocal.name} has no data here`
+                : `${requestedLocal.name} unavailable`;
+            srcDesc = `🗺️ ${STATEWIDE_SOURCE.name} — <b>fallback</b> (${why}) · ${sourceHost(STATEWIDE_SOURCE)}`;
         } else if (activeSource.id === STATEWIDE_SOURCE.id) {
             srcDesc = `🗺️ ${STATEWIDE_SOURCE.name} · ${sourceHost(STATEWIDE_SOURCE)} <span style="color:#888;">(no local source configured for this area)</span>`;
         } else {
