@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.29.44';
+    const SCRIPT_VERSION = '2026.07.29.45';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -1765,8 +1765,24 @@
     // (v.15 — street-object ids miss city-variant duplicates like the
     // "No city"/"Parker" pair on one road), with a geometric fallback: an RPP
     // with an unresolvable street still covers if it sits in the corridor.
-    function existingRppNumbers(segInfos, corridor, viewBbox) {
-        const nums = new Set();
+    // v.45 — returns { covered, disagree } instead of a bare number Set.
+    //
+    // The old version returned NUMBERS ONLY, and its geometric fallback added a
+    // number whenever the RPP sat in the corridor — even when the RPP's street
+    // RESOLVED FINE and simply DISAGREED. So an RPP reading "18929 E Warren Dr"
+    // silently suppressed the GIS point "18929 E WARREN CIR" 13 m away and was
+    // counted as "covered by RPPs" with no report. Josh found it in the field
+    // 2026-07-29 (4 of 5 "covered" RPPs on E Warren Cir were mis-named).
+    //
+    // The fallback's own intent was "an RPP with an UNRESOLVABLE street still
+    // covers if it sits in the corridor" — that case is preserved verbatim.
+    // What is split out is the third case the two branches had collapsed:
+    //   a) street resolves AND matches a selected segment → covered (silent)
+    //   b) street does NOT resolve, but sits in the corridor → covered (silent)
+    //   c) street RESOLVES and does NOT match, in corridor → DISAGREE (reported)
+    function indexRpps(segInfos, corridor, viewBbox) {
+        const covered = new Set();
+        const disagree = new Map();   // normHn → {venueId, hn, rppStreet, lon, lat, dSel}
         const venueObjs = (W && W.model && W.model.venues && W.model.venues.objects) ? W.model.venues.objects : {};
         for (const vid in venueObjs) {
             const venue = W.model.venues.getObjectById(vid);
@@ -1785,18 +1801,38 @@
                 continue;
             }
             let street = '';
+            let resolved = false;
             try {
                 street = W.model.streets.getObjectById(attrs.streetID)?.attributes?.name || '';
+                resolved = !!street;
             } catch { /* unresolved street — geometric fallback below */ }
-            if (street && segInfos.some((si) => si.match(street))) {
-                nums.add(norm);
+            if (resolved && segInfos.some((si) => si.match(street))) {
+                covered.add(norm);      // (a) name agrees — nothing to say
                 continue;
             }
-            if (pt && segInfos.some((si) => metersToLine(pt[0], pt[1], si.line) <= corridor)) {
-                nums.add(norm);
+            const dSel = pt ? Math.min(...segInfos.map((si) => metersToLine(pt[0], pt[1], si.line))) : Infinity;
+            if (dSel > corridor) {
+                continue;               // out of range either way
+            }
+            if (!resolved) {
+                covered.add(norm);      // (b) street won't resolve — original fallback intent
+                continue;
+            }
+            // (c) resolves AND disagrees → a rename candidate, NOT silent cover.
+            // Keep the nearest one per house number (condo units repeat numbers).
+            const prev = disagree.get(norm);
+            if (!prev || dSel < prev.dSel) {
+                disagree.set(norm, {
+                    venueId: String(attrs.id ?? vid),
+                    hn: String(attrs.houseNumber),
+                    rppStreet: street,
+                    lon: pt ? pt[0] : null,
+                    lat: pt ? pt[1] : null,
+                    dSel,
+                });
             }
         }
-        return nums;
+        return { covered, disagree };
     }
 
     // Directional-SIBLING detection (v.29): the one-sided directional ignore
@@ -2072,7 +2108,7 @@
                     existingNums.add(normHn(a.number));
                 }
             }
-            const rppNums = existingRppNumbers(segInfos, hnCorridorM(), viewBbox);
+            const rppIdx = indexRpps(segInfos, hnCorridorM(), viewBbox);
             const otherSegs = loadedDrawnSegments(viewBbox, new Set(scanIds));
 
             setHnStatus('⏳ Querying GIS address points along the selection…', '#06c');
@@ -2086,6 +2122,9 @@
             // Classify candidates within the corridor of the SELECTED segments.
             const missing = [];
             const mismatch = [];
+            // v.45 — RPPs whose street resolves but disagrees with GIS, keyed by
+            // venueId so a condo's repeated house numbers can't list one twice.
+            const renameRpps = new Map();
             let presentCount = 0;
             let rppCoveredCount = 0;
             let nearerOtherCount = 0;
@@ -2239,8 +2278,27 @@
                     spellCands.set(key, c);
                 }
                 const norm = normHn(p.hn);
-                if (rppNums.has(norm)) {
+                if (rppIdx.covered.has(norm)) {
                     rppCoveredCount++;   // an RPP outranks a segment HN — never propose
+                    continue;
+                }
+                // v.45 — an RPP with this house number sits here, but its street
+                // RESOLVES and DISAGREES with GIS. Reaching this line means
+                // `p.street` already matched a SELECTED segment (the non-matching
+                // branch `continue`d far above), so the rename target is a road
+                // Josh deliberately selected, drawn and in view by construction.
+                // ⚠️ Still NOT an Add path — an RPP already exists, so adding a
+                // segment house number would duplicate it. The fix is to correct
+                // the RPP, and that is the editor's call: reviewed, per row.
+                const badRpp = rppIdx.disagree.get(norm);
+                if (badRpp) {
+                    if (!renameRpps.has(badRpp.venueId)) {
+                        renameRpps.set(badRpp.venueId, {
+                            ...badRpp,
+                            gisStreet: p.street,
+                            gisCity: usableGisCity(p.city) || null,
+                        });
+                    }
                     continue;
                 }
                 if (existingNums.has(norm) || hnSessionAdded.has(hnKey(p.street, p.hn))) {
@@ -2333,7 +2391,10 @@
             }
 
             renderHnResults(missing, mismatch, renameSuggestions, segInfos,
-                { altNameSuggestions, aliasReports, consensusCity, consensusVia });
+                {
+                    altNameSuggestions, aliasReports, consensusCity, consensusVia,
+                    renameRpps: [...renameRpps.values()],
+                });
             setHnScanning(false);
             const at = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
             const streets = [...new Set(segInfos.map((s) => s.streetName))].join(', ');
@@ -2350,10 +2411,13 @@
                 capped ? `first ${HN_CONFIG.maxSegmentsPerScan} of ${visibleIds.length} visible selected segments` : '',
                 skipped.length ? `${skipped.length} segment(s) skipped (street not loaded)` : '',
             ].filter(Boolean).join(' · ');
-            const onStreet = presentCount + rppCoveredCount + missing.length;
+            // v.45: rename candidates ARE on-street — they used to be counted
+            // inside rppCoveredCount, so leaving them out would shrink the total.
+            const onStreet = presentCount + rppCoveredCount + renameRpps.size + missing.length;
             const bandDesc = corridorMin > 0 ? `${corridorMin}–${corridor}m band` : `within ${corridor}m`;
             const tallyLine = `GIS: ${gis.points.length} point(s) fetched, ${onStreet} on-street (${bandDesc}) · ${presentCount} already mapped`
                 + `${rppCoveredCount ? ` · ${rppCoveredCount} covered by RPPs` : ''}`
+                + `${renameRpps.size ? ` · <b>${renameRpps.size} RPP street disagrees with GIS</b>` : ''}`
                 + ` · <b>${missing.length} missing</b> · ${mismatch.length} street-mismatch`
                 + `${dupCount ? ` · ${dupCount} duplicate GIS record(s) collapsed` : ''}`
                 + `${nearerOtherCount ? ` · ${nearerOtherCount} nearest to an UNSELECTED segment (select that stretch to work them)` : ''}`
@@ -2365,6 +2429,11 @@
                 setHnStatus(`⚠️ Done ${at} — <b>${streets}</b>: the GIS source has NO on-street address points along this`
                     + ' selection. That means no data to compare — NOT that the map is complete (new construction may'
                     + ` lag the source).<br>${tallyLine}`, '#b26a00');
+            } else if (missing.length === 0 && renameRpps.size) {
+                // v.45: "all already mapped" would be a lie while RPPs sit here
+                // under the wrong street name — that was the whole bug.
+                setHnStatus(`⚠️ Done ${at} — <b>${streets}</b>: no house numbers missing, but `
+                    + `<b>${renameRpps.size} RPP(s) carry a different street name than GIS</b>. Review below.<br>${tallyLine}`, '#b26a00');
             } else if (missing.length === 0) {
                 setHnStatus(`✅ Done ${at} — <b>${streets}</b>: all ${onStreet} GIS house number(s) here are already mapped.<br>${tallyLine}`, '#0a7');
             } else {
@@ -2379,6 +2448,46 @@
     }
 
     // ---- add (the map-writing action — reviewed, one at a time) --------------
+
+    // v.45 — repoint ONE mis-named RPP at the street GIS says it belongs to.
+    // Only the street changes: the house number is echoed back unchanged, and
+    // the city only moves when GIS offers a usable one that actually differs.
+    // Geometry and navigation points are never touched.
+    function hnRenameRppOne(c) {
+        if (!wmeSdk) {
+            return { ok: false, err: 'SDK unavailable' };
+        }
+        if (wmeSdk.Editing.getUnsavedChangesCount() >= HN_CONFIG.saveQueueLimit) {
+            return { ok: false, err: `WME's save queue is full (${HN_CONFIG.saveQueueLimit}) — SAVE in WME, then rescan` };
+        }
+        const before = wmeSdk.Editing.getUnsavedChangesCount();
+        try {
+            // Reuse the RPP's OWN city unless GIS names a usable different one —
+            // the street must be created under the right city or WME silently
+            // resolves a same-named street in another city.
+            const cur = wmeSdk.DataModel.Venues.getAddress({ venueId: c.venueId });
+            let cityId = cur && cur.city ? cur.city.id : null;
+            if (c.gisCity && cur && cur.city && titleCaseName(c.gisCity) !== cur.city.name) {
+                cityId = ensureCity(titleCaseName(c.gisCity)).id;
+            }
+            const street = ensureStreet(titleCaseName(c.gisStreet), cityId);
+            if (!street || street.id == null) {
+                return { ok: false, err: `could not resolve street "${c.gisStreet}"` };
+            }
+            wmeSdk.DataModel.Venues.updateAddress({
+                venueId: String(c.venueId),
+                houseNumber: c.hn,
+                streetId: street.id,
+            });
+        } catch (e) {
+            return { ok: false, err: `${e.name || 'error'}: ${e.message}` };
+        }
+        if (wmeSdk.Editing.getUnsavedChangesCount() <= before) {
+            return { ok: false, err: 'no edit registered — check the console' };
+        }
+        console.log(`${HN_LOG} RPP ${c.venueId} HN ${c.hn}: "${c.rppStreet}" → "${titleCaseName(c.gisStreet)}" (GIS) — UNSAVED.`);
+        return { ok: true };
+    }
 
     function hnAddOne(c) {
         if (!wmeSdk) {
@@ -2733,7 +2842,7 @@
         if (!hnResultsRef) {
             return;
         }
-        const { altNameSuggestions = [], aliasReports = [], consensusCity = null, consensusVia = 'GIS' } = extra || {};
+        const { altNameSuggestions = [], aliasReports = [], consensusCity = null, consensusVia = 'GIS', renameRpps = [] } = extra || {};
         hnResultsRef.innerHTML = '';
         hnPendingRows = [];
         if (hnAddAllRef) {
@@ -2800,6 +2909,86 @@
                 box.appendChild(btn);
                 hnResultsRef.appendChild(box);
             });
+        }
+        // v.45 — RPP street disagrees with GIS. Checkbox list + explicit commit,
+        // deliberately mirroring the HN→RPP tab (Josh's call 2026-07-29: "we
+        // list and offer, I click what needs to be changed, then commit").
+        // NOT a bulk button: main-street addresses are routinely reachable only
+        // from a PLR or another road, so the editor's eye is the last guard.
+        if (renameRpps && renameRpps.length) {
+            const wrap = document.createElement('div');
+            wrap.style.cssText = 'margin:6px 0;padding:7px 9px;background:#eef3fb;border-left:3px solid #36c;border-radius:4px;font-size:11px;color:#123;';
+            const head = document.createElement('div');
+            head.innerHTML = `🏷️ <b>RPP street disagrees with GIS — ${renameRpps.length} found.</b><br>`
+                + 'These RPPs carry the right house number but a different street name than the '
+                + 'authoritative GIS. Tick the ones to repoint, then commit. '
+                + '<i>Distances are to the selected road — shown only to eyeball, never used to decide.</i>';
+            wrap.appendChild(head);
+
+            const toggle = document.createElement('label');
+            toggle.style.cssText = 'display:block;margin:6px 0 3px;font-weight:bold;cursor:pointer;';
+            const toggleCb = document.createElement('input');
+            toggleCb.type = 'checkbox';
+            toggleCb.style.cssText = 'margin-right:5px;vertical-align:middle;';
+            toggle.appendChild(toggleCb);
+            toggle.appendChild(document.createTextNode('Select all / none'));
+            wrap.appendChild(toggle);
+
+            const boxes = [];
+            renameRpps.forEach((c) => {
+                const row = document.createElement('div');
+                row.style.cssText = 'display:flex;align-items:center;gap:6px;margin:2px 0;';
+                const cb = document.createElement('input');
+                cb.type = 'checkbox';   // default UNCHECKED — nothing fires unless Josh picks it
+                cb.style.cssText = 'vertical-align:middle;';
+                const lbl = document.createElement('span');
+                lbl.style.cssText = 'flex:1;';
+                lbl.innerHTML = `<b>${c.hn}</b> &nbsp;<span style="color:#a00;">${c.rppStreet}</span>`
+                    + ` → <span style="color:#070;font-weight:bold;">${titleCaseName(c.gisStreet)}</span>`
+                    + ` <span style="color:#888;">(${Math.round(c.dSel)} m from the selected road)</span>`;
+                row.appendChild(cb);
+                row.appendChild(lbl);
+                if (c.lon != null && c.lat != null) {
+                    row.appendChild(makeGoButton(c.lon, c.lat));
+                }
+                wrap.appendChild(row);
+                boxes.push({ cb, c, row });
+            });
+            toggleCb.addEventListener('change', () => {
+                boxes.forEach((b) => {
+                    b.cb.checked = toggleCb.checked;
+                });
+            });
+
+            const btn = document.createElement('button');
+            btn.style.cssText = 'margin-top:6px;padding:4px 9px;background:#36c;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:11px;';
+            btn.textContent = 'Rename checked';
+            btn.title = 'Repoint each ticked RPP at the street GIS says it belongs to. House number and geometry are untouched. Unsaved until you save in WME.';
+            btn.addEventListener('click', () => {
+                const picked = boxes.filter((b) => b.cb.checked);
+                if (!picked.length) {
+                    head.innerHTML = '🏷️ <b>Nothing ticked</b> — check the rows you want repointed first.';
+                    return;
+                }
+                let done = 0;
+                const fails = [];
+                for (const b of picked) {
+                    const res = hnRenameRppOne(b.c);
+                    if (res.ok) {
+                        done++;
+                        b.cb.disabled = true;
+                        b.cb.checked = false;
+                        b.row.style.opacity = '0.55';
+                        b.row.querySelector('span').innerHTML += ' <b style="color:#070;">✓ renamed</b>';
+                    } else {
+                        fails.push(`${b.c.hn}: ${res.err}`);
+                    }
+                }
+                head.innerHTML = `🏷️ <b>Renamed ${done} RPP(s)</b> — UNSAVED until you save in WME.`
+                    + (fails.length ? `<br><span style="color:#c00;">${fails.length} failed: ${fails.join(' · ')}</span>` : '');
+            });
+            wrap.appendChild(btn);
+            hnResultsRef.appendChild(wrap);
         }
         // Uncorroborated unmatched names (v.42): REPORT-ONLY — likely an
         // undrawn side road, never an add path.
