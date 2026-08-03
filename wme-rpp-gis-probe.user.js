@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.08.03.47';
+    const SCRIPT_VERSION = '2026.08.03.48';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -1371,6 +1371,43 @@
 
     // ---- snap (the ONLY map-writing action — reviewed, one at a time) ---------
 
+    // Delete the venue's stop/entry point(s) and remake ONE primary point at the
+    // pin's new home (Josh 2026-08-03). `replaceNavigationPoints` REPLACES the
+    // whole set rather than appending, so the stranded old point is gone by
+    // construction — "delete then remake" is what the call already means.
+    // ⚠️ This API did NOT exist when the +RPP workflow was written (2026-07-21:
+    // "no SDK write path for navigationPoints"). Re-verified 2026-08-03 against
+    // the current typings before use — don't trust the old comment, it's stale.
+    // An RPP carries a single point in practice; a venue that somehow held a
+    // separate entry AND exit would be collapsed to one, which is why the count
+    // removed is logged rather than assumed.
+    function resetNavigationPoints(venueId, lon, lat) {
+        const venues = wmeSdk && wmeSdk.DataModel && wmeSdk.DataModel.Venues;
+        if (!venues || typeof venues.replaceNavigationPoints !== 'function') {
+            return { ok: false, err: 'this WME build has no replaceNavigationPoints' };
+        }
+        let removed = null;
+        try {
+            const venue = venues.getById({ venueId });
+            removed = (venue && venue.navigationPoints) ? venue.navigationPoints.length : 0;
+        } catch { /* the count is for the log only — never block the reset on it */ }
+        try {
+            venues.replaceNavigationPoints({
+                venueId,
+                navigationPoints: [{
+                    point: { type: 'Point', coordinates: [lon, lat] },
+                    isPrimary: true,
+                    isEntry: true,
+                    isExit: true,
+                    name: '',
+                }],
+            });
+            return { ok: true, removed };
+        } catch (e) {
+            return { ok: false, err: `${e.name || 'error'}: ${e.message}`, removed };
+        }
+    }
+
     function snapRpp(venueId, lon, lat) {
         if (!wmeSdk || !wmeSdk.DataModel || !wmeSdk.DataModel.Venues) {
             return { ok: false, err: 'SDK Venues unavailable' };
@@ -1380,10 +1417,22 @@
                 venueId,
                 geometry: { type: 'Point', coordinates: [lon, lat] },
             });
-            return { ok: true };
         } catch (e) {
             return { ok: false, err: e.message };
         }
+        // The pin has moved; the OLD stop point has not. Left alone it still
+        // routes drivers to the spot we just corrected — so the reset is part
+        // of Snap, not a separate button.
+        const nav = resetNavigationPoints(venueId, lon, lat);
+        if (nav.ok) {
+            console.log(`${LOG} venue ${venueId}: pin snapped and stop point remade at (${lon.toFixed(6)}, ${lat.toFixed(6)})`
+                + `${nav.removed == null ? '' : ` — replaced ${nav.removed} existing point(s)`} — UNSAVED.`);
+        } else {
+            // The move succeeded; only the stop-point reset failed. Say so
+            // rather than reporting a clean snap he'd never think to check.
+            console.warn(`${LOG} venue ${venueId}: pin snapped but the stop point was NOT remade — ${nav.err}`);
+        }
+        return { ok: true, navOk: nav.ok, navErr: nav.err };
     }
 
     // Pan + zoom the WME map to a location (read-only; just moves the view).
@@ -1437,11 +1486,20 @@
         const btn = document.createElement('button');
         btn.textContent = 'Snap';
         btn.style.cssText = 'padding:3px 8px;background:#0a7;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:11px;';
+        btn.title = 'Move the pin onto its GIS point AND remake its stop point there (the old stop point is deleted). Unsaved until you save in WME.';
         btn.addEventListener('click', () => {
             const res = snapRpp(m.id, m.lon, m.lat);
             if (res.ok) {
-                span.textContent = `✓ snapped — ${m.address}`;
-                span.style.color = '#0a0';
+                // A half-done Snap must not read as a clean one: the pin moved,
+                // but a stop point still sitting at the old spot is the whole
+                // problem this is meant to fix.
+                if (res.navOk) {
+                    span.textContent = `✓ snapped + stop point remade — ${m.address}`;
+                    span.style.color = '#0a0';
+                } else {
+                    span.textContent = `⚠ snapped, but the stop point was NOT remade (${res.navErr}) — drag it by hand: ${m.address}`;
+                    span.style.color = '#b26a00';
+                }
                 btn.remove();
             } else {
                 span.textContent = `✗ ${m.address}: ${res.err}`;

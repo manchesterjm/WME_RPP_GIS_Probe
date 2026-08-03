@@ -144,6 +144,15 @@ function assertShippedSourceMatches() {
         'evaluateRpp(info, points, farCapM)',
         "const PROBE_FAR_STORE = 'rppProbe.farOwnM';",
         'id="rpp-gis-probe-farown"',
+        // v.48 — Snap must also remake the stop point. Not unit-testable (it is
+        // a live SDK write), so the wiring is pinned here instead: the reset is
+        // called from snapRpp, and its outcome reaches the row so a half-done
+        // snap can't render as a clean one.
+        'function resetNavigationPoints(venueId, lon, lat)',
+        'venues.replaceNavigationPoints({',
+        'const nav = resetNavigationPoints(venueId, lon, lat);',
+        'return { ok: true, navOk: nav.ok, navErr: nav.err };',
+        'if (res.navOk) {',
     ];
     const missing = required.filter((s) => !src.includes(s));
     if (missing.length) {
@@ -155,7 +164,7 @@ function assertShippedSourceMatches() {
         console.error('FAIL: the ladder reads CONFIG.farOwnM directly again — the box would stop working.');
         return false;
     }
-    console.log(`shipped-source guard: OK (7 conditions present; defaults far=${CONFIG.farOwnM} wellPlaced=${CONFIG.wellPlacedM} margin=${CONFIG.misplacedMarginM})`);
+    console.log(`shipped-source guard: OK (12 conditions present; defaults far=${CONFIG.farOwnM} wellPlaced=${CONFIG.wellPlacedM} margin=${CONFIG.misplacedMarginM})`);
     return true;
 }
 
