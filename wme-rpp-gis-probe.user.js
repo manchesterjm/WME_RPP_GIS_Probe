@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.08.03.48';
+    const SCRIPT_VERSION = '2026.08.03.49';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -82,6 +82,7 @@
         {
             id: 'cosp',
             name: 'El Paso County (COSP GIS)',
+            county: 'El Paso',   // statewide composite's own spelling — the county gate compares against this
             url: 'https://gis.coloradosprings.gov/arcgis/rest/services/GeneralUse/LandRecords/MapServer/0/query',
             // ⚠️ 2026-07-21: this "city" service is actually EL PASO COUNTY-WIDE —
             // verified at Peyton (House Rock Dr: 44 points incl. the POST-replat
@@ -103,6 +104,7 @@
         {
             id: 'douglas',
             name: 'Douglas County',
+            county: 'Douglas',   // statewide composite's own spelling — the county gate compares against this
             // ⚠️ 2026-07-21: the old Address/FeatureServer/0 (the one the WME GIS
             // Layers sheet still lists) now has ZERO layers — every query 400s
             // "Invalid URL". Replaced with the org's AddressSearch view: same
@@ -138,6 +140,7 @@
         {
             id: 'broomfield',
             name: 'Broomfield County',
+            county: 'Broomfield',   // statewide composite's own spelling — the county gate compares against this
             url: 'https://services1.arcgis.com/vXSRPZbyyOmH9pek/arcgis/rest/services/Addresses/FeatureServer/0/query',
             bbox: [-105.164, 39.889, -104.951, 40.044],
             fields: (a) => ({
@@ -155,6 +158,7 @@
         {
             id: 'boulder',
             name: 'Boulder County',
+            county: 'Boulder',   // statewide composite's own spelling — the county gate compares against this
             url: 'https://maps.bouldercounty.org/arcgis/rest/services/PARCELS/ADDRESS_POINTS/MapServer/0/query',
             bbox: [-105.646, 39.912, -105.051, 40.263],
             fields: (a) => ({
@@ -169,6 +173,7 @@
         {
             id: 'jefferson',
             name: 'Jefferson County',
+            county: 'Jefferson',   // statewide composite's own spelling — the county gate compares against this
             // No bare house-number field — parse it off the full ADDRESS.
             url: 'https://mapservices2.jeffco.us/arcgis/rest/services/jMap/Address/MapServer/0/query',
             bbox: [-105.399, 39.182, -105.053, 39.914],
@@ -186,6 +191,7 @@
         {
             id: 'arapahoe',
             name: 'Arapahoe County',
+            county: 'Arapahoe',   // statewide composite's own spelling — the county gate compares against this
             url: 'https://gis.arapahoegov.com/arcgis/rest/services/OpenDataService/MapServer/4/query',
             bbox: [-105.058, 39.549, -103.715, 39.787],
             fields: (a) => ({
@@ -200,6 +206,7 @@
         {
             id: 'pitkin',
             name: 'Pitkin County',
+            county: 'Pitkin',   // statewide composite's own spelling — the county gate compares against this
             url: 'https://gispub.cityofaspen.com/server/rest/services/PitkinCounty/Pitkin_Layers/MapServer/1/query',
             bbox: [-107.367, 38.997, -106.495, 39.401],
             fields: (a) => ({
@@ -230,6 +237,7 @@
         {
             id: 'montezuma',
             name: 'Montezuma County',
+            county: 'Montezuma',   // statewide composite's own spelling — the county gate compares against this
             url: 'https://gis-server.co.montezuma.co.us/arcgis/rest/services/Address_Verification_Viewer/MapServer/0/query',
             bbox: [-109.041, 37.217, -108.066, 37.632],
             fields: (a) => ({
@@ -244,6 +252,7 @@
         {
             id: 'eagle',
             name: 'Eagle County',
+            county: 'Eagle',   // statewide composite's own spelling — the county gate compares against this
             url: 'https://map.eaglecounty.us/arcgiswa/rest/services/FlexApp/Address_ForLabel/MapServer/0/query',
             bbox: [-107.125, 39.354, -106.227, 39.924],
             fields: (a) => ({
@@ -258,6 +267,7 @@
         {
             id: 'summit',
             name: 'Summit County',
+            county: 'Summit',   // statewide composite's own spelling — the county gate compares against this
             // 2026-07-22 (Beeler Pl, Copper Mtn): the sheet's Address_Points layer
             // is EMPTY (0 records) — the live one, found via the org folder, is
             // AddressesForGeocoding (41.8k, split fields; the CR alias sits in its
@@ -290,6 +300,7 @@
         {
             id: 'pueblo',
             name: 'Pueblo County',
+            county: 'Pueblo',   // statewide composite's own spelling — the county gate compares against this
             // The sheet's PuebloCounty_AddressPoints service is gone; the live
             // one (2026-07-21) is ..._AddressPointsLayer.
             url: 'https://maps.co.pueblo.co.us/outside/rest/services/Landbase/PuebloCounty_AddressPointsLayer/MapServer/0/query',
@@ -306,6 +317,7 @@
         {
             id: 'routt',
             name: 'Routt County',
+            county: 'Routt',   // statewide composite's own spelling — the county gate compares against this
             url: 'https://services6.arcgis.com/VxFGFP4XeHMTNgVs/ArcGIS/rest/services/Routt_County_Addresses/FeatureServer/0/query',
             bbox: [-107.458, 39.912, -106.639, 41.012],
             fields: (a) => ({
@@ -320,6 +332,7 @@
         {
             id: 'grand',
             name: 'Grand County',
+            county: 'Grand',   // statewide composite's own spelling — the county gate compares against this
             url: 'https://gis.co.grand.co.us:6443/arcgis/rest/services/Property/AddressPoints/MapServer/0/query',
             bbox: [-106.741, 39.702, -105.572, 40.539],
             fields: (a) => ({
@@ -334,6 +347,7 @@
         {
             id: 'weld',
             name: 'Weld County',
+            county: 'Weld',   // statewide composite's own spelling — the county gate compares against this
             url: 'https://services.arcgis.com/ewjSqmSyHJnkfBLL/ArcGIS/rest/services/Address_Points_open_data/FeatureServer/1/query',
             bbox: [-105.056, 40.001, -103.583, 41.001],
             fields: (a) => ({
@@ -348,6 +362,7 @@
         {
             id: 'mesa',
             name: 'Mesa County (E911)',
+            county: 'Mesa',   // statewide composite's own spelling — the county gate compares against this
             // Not in the GIS Layers sheet at all — found via the county's Open
             // Data hub 2026-07-21 (their old gis.mesacounty.us ArcGIS server is
             // retired; mcgis is current). E911 point set, ~90k addresses.
@@ -367,6 +382,7 @@
         {
             id: 'lasanimas',
             name: 'Las Animas County',
+            county: 'Las Animas',   // statewide composite's own spelling — the county gate compares against this
             // NENA-style coded fields: SAN = house number, StName = full street,
             // FSA = full address, MCN = community.
             url: 'https://services7.arcgis.com/NWWOCaXnjdetEWUz/ArcGIS/rest/services/LasAnimasAddressPts/FeatureServer/0/query',
@@ -383,6 +399,7 @@
         {
             id: 'laplata',
             name: 'La Plata County',
+            county: 'La Plata',   // statewide composite's own spelling — the county gate compares against this
             // ⚠️ HOST MOVED: the WME GIS Layers sheet still lists
             // gis.laplata.co.us, which 301s to gis.lpcgov.org (verified
             // 2026-07-25) — same upstream-staleness class as the dead Douglas
@@ -413,6 +430,110 @@
         }
         return LOCAL_SOURCES.find((s) =>
             s.bbox && lon >= s.bbox[0] && lon <= s.bbox[2] && lat >= s.bbox[1] && lat <= s.bbox[3]) || null;
+    }
+
+    // ---- county gate (v.49) ---------------------------------------------------
+    // A bbox is a RECTANGLE and cannot follow a county line, so pickLocalSource
+    // will sometimes hand back a source for ground it does not govern. v.44
+    // caught the case where that source answers ZERO — but the far worse case is
+    // when it answers PLENTY, for the wrong jurisdiction, and the scan quietly
+    // reports another county's streets as authoritative.
+    //
+    // FIELD CASE (Josh, 2026-08-03, W 120th Ave): W 120th IS the Adams/Broomfield
+    // county line. His view sat on the ADAMS side; Broomfield's bbox covers it, so
+    // the scan used Broomfield — which holds the NORTH side, an office park
+    // genuinely addressed W 121ST AVE. 188 points came back (so v.44's zero-guard
+    // never fired), zero of them on his street, and the tab reported "GIS reads
+    // W 121st Ave" for a road correctly named W 120th Ave.
+    //
+    // The fix is a POSITIVE jurisdiction test rather than a tighter rectangle:
+    // ask the statewide composite which county this spot is actually in — it
+    // carries a `County` attribute that is correct on both sides of the line —
+    // and refuse a local source that governs a different one.
+    // County POLYGONS, point-in-polygon. Same host as the statewide composite, so
+    // no new @connect grant. Its `County` values are spelled exactly like the
+    // composite's `County` attribute (verified across all 17 source counties).
+    //
+    // ⚠️ DO NOT go back to "majority county among the nearest address points".
+    // That was the first cut and it FAILED on the very case this gate exists for:
+    // at Josh's view centre the nearest 10 points ran Broomfield 6 / Adams 4 —
+    // the dense office park across the line outvoted the sparser Adams frontage —
+    // so it answered "Broomfield" for a spot that is plainly in Adams. A proxy
+    // for "which side of the line am I on" cannot be trusted AT the line, which
+    // is the only place it is ever consulted. Polygons are exact, and they also
+    // work in the 16 counties that have ZERO rows in the address composite
+    // (measured: La Junta → "Otero", where the address-point method returns
+    // nothing at all).
+    const COUNTY_LAYER_URL = 'https://gis.colorado.gov/public/rest/services/OIT/County_GIS_Webpages/MapServer/0/query';
+
+    function countyOf(source) {
+        return (source && source.county) ? source.county.toUpperCase() : null;
+    }
+
+    // → county name, or null when it cannot be established. Null ALWAYS means
+    // "don't gate" — see pickSourceForView.
+    function resolveViewCounty(lon, lat) {
+        const params = new URLSearchParams({
+            f: 'json',
+            geometry: JSON.stringify({ x: lon, y: lat, spatialReference: { wkid: 4326 } }),
+            geometryType: 'esriGeometryPoint',
+            spatialRel: 'esriSpatialRelIntersects',
+            inSR: '4326',
+            outFields: 'County',
+            returnGeometry: 'false',
+        });
+        return new Promise((resolve) => {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: `${COUNTY_LAYER_URL}?${params.toString()}`,
+                timeout: 15000,
+                onload: (res) => {
+                    if (res.status >= 400) {
+                        resolve(null);
+                        return;
+                    }
+                    try {
+                        const data = JSON.parse(res.responseText);
+                        const ft = (data.features || [])[0];
+                        resolve((ft && ft.attributes && ft.attributes.County) || null);
+                    } catch {
+                        resolve(null);
+                    }
+                },
+                onerror: () => resolve(null),
+                ontimeout: () => resolve(null),
+            });
+        });
+    }
+
+    // Choose the source for a scan: bbox first, then the county gate.
+    // Returns {source, requestedLocal, county, gate} where `gate` records WHY,
+    // so the tab can tell Josh a wrong-county rejection from a dead service.
+    async function pickSourceForView(lon, lat) {
+        const bboxPick = pickLocalSource(lon, lat);
+        if (!bboxPick) {
+            return { source: STATEWIDE_SOURCE, requestedLocal: null, county: null, gate: 'no-local' };
+        }
+        const county = await resolveViewCounty(lon, lat);
+        // ⚠️ FAIL OPEN. 16 of Colorado's 64 counties have ZERO rows in the
+        // statewide composite (Otero, Crowley, Fremont…), and the service can
+        // simply be down. Either way the gate must not strip a working local
+        // source on no evidence — silence is not a wrong-county verdict.
+        if (!county) {
+            return { source: bboxPick, requestedLocal: bboxPick, county: null, gate: 'unverified' };
+        }
+        if (countyOf(bboxPick) === county.toUpperCase()) {
+            return { source: bboxPick, requestedLocal: bboxPick, county, gate: 'confirmed' };
+        }
+        // Wrong jurisdiction. Another configured source may govern THIS county
+        // and also cover the point — in an overlap band that is the right answer.
+        const byCounty = LOCAL_SOURCES.find((s) => countyOf(s) === county.toUpperCase()
+            && s.bbox && lon >= s.bbox[0] && lon <= s.bbox[2] && lat >= s.bbox[1] && lat <= s.bbox[3]);
+        if (byCounty) {
+            return { source: byCounty, requestedLocal: bboxPick, county, gate: 'reassigned' };
+        }
+        // No local source for this county (e.g. Adams, dropped in v.44) → statewide.
+        return { source: STATEWIDE_SOURCE, requestedLocal: bboxPick, county, gate: 'wrong-county' };
     }
 
     function sourceHost(src) {
@@ -1232,9 +1353,17 @@
         const center = vb
             ? [(vb[0] + vb[2]) / 2, (vb[1] + vb[3]) / 2]
             : [getRppInfo(rpps[0]).lon, getRppInfo(rpps[0]).lat];
-        const requestedLocal = pickLocalSource(center[0], center[1]);
-        let activeSource = requestedLocal || STATEWIDE_SOURCE;
-        let usedFallback = false;
+        // v.49 — bbox pick + COUNTY GATE (see pickSourceForView). Async, so the
+        // status line says what it's doing rather than sitting silent.
+        setProbeStatus('⏳ Checking which county this view is in…', '#06c');
+        const picked = await pickSourceForView(center[0], center[1]);
+        const { requestedLocal, county: viewCounty, gate: countyGate } = picked;
+        let activeSource = picked.source;
+        let usedFallback = countyGate === 'wrong-county' ? 'county' : false;
+        if (countyGate === 'wrong-county' || countyGate === 'reassigned') {
+            console.warn(`${LOG} county gate: this view is in ${viewCounty} County, but ${requestedLocal.name}'s bbox claimed it`
+                + ` → using ${activeSource.name} instead.`);
+        }
         // Read the user's search distance ONCE, like the source pick — editing
         // the box mid-scan must not make some RPPs answer at a different radius.
         const radiusM = probeRadiusM();
@@ -1349,14 +1478,25 @@
             // hole (the service was healthy, it just has no data on this side
             // of the county line), and that wording would send the next
             // investigation after a non-existent outage.
-            const why = usedFallback === 'coverage'
-                ? `${requestedLocal.name} has no data here`
-                : `${requestedLocal.name} unavailable`;
+            // v.49 adds 'county': the source was healthy and had data — it just
+            // governs the wrong county. Saying "unavailable" or "no data here"
+            // would both be false and would misdirect the next investigation.
+            let why;
+            if (usedFallback === 'county') {
+                why = `this view is in ${viewCounty} County, not ${requestedLocal.county}`;
+            } else if (usedFallback === 'coverage') {
+                why = `${requestedLocal.name} has no data here`;
+            } else {
+                why = `${requestedLocal.name} unavailable`;
+            }
             srcDesc = `🗺️ ${STATEWIDE_SOURCE.name} — <b>fallback</b> (${why}) · ${sourceHost(STATEWIDE_SOURCE)}`;
         } else if (activeSource.id === STATEWIDE_SOURCE.id) {
             srcDesc = `🗺️ ${STATEWIDE_SOURCE.name} · ${sourceHost(STATEWIDE_SOURCE)} <span style="color:#888;">(no local source configured for this area)</span>`;
         } else {
-            srcDesc = `🗺️ ${activeSource.name} <b>(local)</b> · ${sourceHost(activeSource)}`;
+            const gateNote = countyGate === 'reassigned'
+                ? ` <span style="color:#888;">(county gate: ${viewCounty} County — ${requestedLocal.name}'s bbox claimed this spot)</span>`
+                : (countyGate === 'unverified' ? ' <span style="color:#888;">(county unconfirmed)</span>' : '');
+            srcDesc = `🗺️ ${activeSource.name} <b>(local)</b> · ${sourceHost(activeSource)}${gateNote}`;
         }
         // Both distances are in the footer because they change what the verdicts
         // MEAN — a no-gis at 60m and a no-gis at 500m are different findings, and
@@ -1777,7 +1917,22 @@
     // empty scan). Returns { error, points, source, usedFallback }.
     async function queryGisAlongSegments(segInfos, scanBbox) {
         const mid = samplePointsAlong(segInfos[0].line)[0];
-        const requestedLocal = pickLocalSource(mid[0], mid[1]);
+        // v.49 — the COUNTY GATE runs before anything is queried. Josh's W 120th
+        // Ave case: Broomfield's bbox claimed a view sitting in ADAMS county, its
+        // service answered 188 points for the far side of the county line, and
+        // the merge/fallback machinery below could not help because it all keys
+        // off the local source being empty or erroring. It was neither.
+        const picked = await pickSourceForView(mid[0], mid[1]);
+        const requestedLocal = picked.source.id === STATEWIDE_SOURCE.id ? null : picked.source;
+        const countyGate = picked.gate;
+        const viewCounty = picked.county;
+        if (countyGate === 'wrong-county' || countyGate === 'reassigned') {
+            console.warn(`${HN_LOG} county gate: this selection is in ${viewCounty} County, but ${picked.requestedLocal.name}'s`
+                + ` bbox claimed it → using ${picked.source.name} instead.`);
+        }
+        // Every return below carries the gate verdict so the status line can
+        // explain a wrong-county reassignment instead of silently swapping sources.
+        const withGate = (r) => ({ ...r, countyGate, viewCounty, gatedFrom: picked.requestedLocal });
         const radius = hnQueryRadiusM();
         if (requestedLocal) {
             const local = await querySamplesWithSource(segInfos, requestedLocal, radius, scanBbox);
@@ -1798,7 +1953,7 @@
                     && segInfos.some((si) => si.match(p.street)
                         && metersToLine(p.lon, p.lat, si.line) <= corridorNow));
                 if (anyOnStreet) {
-                    return { error: null, points: local.points, source: requestedLocal, usedFallback: false };
+                    return withGate({ error: null, points: local.points, source: requestedLocal, usedFallback: false });
                 }
                 console.warn(`${HN_LOG} ${requestedLocal.name} has no on-street points here → merging statewide.`);
                 const state = await querySamplesWithSource(segInfos, STATEWIDE_SOURCE, radius, scanBbox);
@@ -1810,19 +1965,19 @@
                             seen.set(k, p);
                         }
                     }
-                    return {
+                    return withGate({
                         error: null, points: [...seen.values()], source: requestedLocal,
                         usedFallback: false, merged: true,
-                    };
+                    });
                 }
-                return { error: null, points: local.points, source: requestedLocal, usedFallback: false };
+                return withGate({ error: null, points: local.points, source: requestedLocal, usedFallback: false });
             }
             console.warn(`${HN_LOG} ${requestedLocal.name} ${local.error ? `failed (${local.error})` : 'returned no points'} → statewide fallback.`);
             const state = await querySamplesWithSource(segInfos, STATEWIDE_SOURCE, radius, scanBbox);
-            return { error: state.error, points: state.points, source: STATEWIDE_SOURCE, usedFallback: true };
+            return withGate({ error: state.error, points: state.points, source: STATEWIDE_SOURCE, usedFallback: true });
         }
         const state = await querySamplesWithSource(segInfos, STATEWIDE_SOURCE, radius, scanBbox);
-        return { error: state.error, points: state.points, source: STATEWIDE_SOURCE, usedFallback: false };
+        return withGate({ error: state.error, points: state.points, source: STATEWIDE_SOURCE, usedFallback: false });
     }
 
     // ---- scan ----------------------------------------------------------------
@@ -2544,7 +2699,15 @@
             const at = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
             const streets = [...new Set(segInfos.map((s) => s.streetName))].join(', ');
             let srcDesc;
-            if (gis.usedFallback) {
+            if (gis.countyGate === 'wrong-county') {
+                // v.49 — the loudest of the three: a healthy neighbouring-county
+                // service WAS about to answer, with its own streets.
+                srcDesc = `${STATEWIDE_SOURCE.name} — county gate: this selection is in ${gis.viewCounty} County, `
+                    + `not ${gis.gatedFrom.county} (${gis.gatedFrom.name}'s bbox claimed it) · ${sourceHost(STATEWIDE_SOURCE)}`;
+            } else if (gis.countyGate === 'reassigned') {
+                srcDesc = `${gis.source.name} (local) — county gate: ${gis.viewCounty} County, `
+                    + `reassigned from ${gis.gatedFrom.name} · ${sourceHost(gis.source)}`;
+            } else if (gis.usedFallback) {
                 srcDesc = `${STATEWIDE_SOURCE.name} — fallback · ${sourceHost(STATEWIDE_SOURCE)}`;
             } else if (gis.merged) {
                 srcDesc = `${gis.source.name} (local) + statewide merge — local had no on-street points here`;
