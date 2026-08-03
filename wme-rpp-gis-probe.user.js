@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.07.29.45';
+    const SCRIPT_VERSION = '2026.08.03.46';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -434,7 +434,12 @@
         // row-less no-match). Raised 60 → 500 for the 2026-07-21 Mesa County
         // case; the nearest-point rule is distance-ranked, so a bigger radius
         // doesn't loosen verdicts.
+        // DEFAULT only — the 🔬 tab has a user-editable "Search distance" field
+        // (persisted in localStorage), same as the HN Filler's: 500 suits rural
+        // CO but a dense subdivision is quicker and quieter at 60-150.
         queryRadiusM: 500,     // how far around an RPP to pull authoritative points
+        queryRadiusMinM: 20,   // sanity clamp for the user field
+        queryRadiusMaxM: 2000,
         // The nearest-point rule alone breaks in SPARSE country (2026-07-21,
         // Mesa Co): a pin 150m+ wrong can still have its own point nearest
         // because the next house is farther still. A correctly placed pin sits
@@ -1127,6 +1132,38 @@
 
     // ---- main probe -----------------------------------------------------------
 
+    // User-adjustable search distance for the 🔬 tab — the radius around each RPP
+    // the GIS is queried at. Same shape as the HN Filler's corridor field so the
+    // two tabs behave alike (clamped, persisted, clamped value reflected back).
+    const PROBE_RADIUS_STORE = 'rppProbe.queryRadiusM';
+
+    function clampProbeRadius(v) {
+        // A CLEARED box is Number('') === 0, which is finite and would clamp to
+        // the MINIMUM — a silent 20m probe reports no-gis on everything. Blank
+        // means "give me the default", not "give me the smallest legal value".
+        const s = String(v).trim();
+        const n = Math.round(Number(s));
+        if (!s || !isFinite(n)) {
+            return CONFIG.queryRadiusM;
+        }
+        return Math.min(CONFIG.queryRadiusMaxM, Math.max(CONFIG.queryRadiusMinM, n));
+    }
+
+    function probeRadiusM() {
+        try {
+            const saved = localStorage.getItem(PROBE_RADIUS_STORE);
+            return saved == null ? CONFIG.queryRadiusM : clampProbeRadius(saved);
+        } catch {
+            return CONFIG.queryRadiusM;
+        }
+    }
+
+    function setProbeRadiusM(v) {
+        try {
+            localStorage.setItem(PROBE_RADIUS_STORE, String(clampProbeRadius(v)));
+        } catch { /* private mode etc. — session keeps the default */ }
+    }
+
     async function probeVisibleRPPs() {
         const zoom = getZoom();
         if (zoom != null && zoom < CONFIG.minZoom) {
@@ -1155,7 +1192,10 @@
         const requestedLocal = pickLocalSource(center[0], center[1]);
         let activeSource = requestedLocal || STATEWIDE_SOURCE;
         let usedFallback = false;
-        console.log(`%c${LOG} probing ${rpps.length} visible RPP(s) vs ${activeSource.name} [${sourceHost(activeSource)}] — READ-ONLY, no edits.`, 'color:#0a7;font-weight:bold');
+        // Read the user's search distance ONCE, like the source pick — editing
+        // the box mid-scan must not make some RPPs answer at a different radius.
+        const radiusM = probeRadiusM();
+        console.log(`%c${LOG} probing ${rpps.length} visible RPP(s) vs ${activeSource.name} [${sourceHost(activeSource)}] within ${radiusM}m — READ-ONLY, no edits.`, 'color:#0a7;font-weight:bold');
 
         const tally = {};
         const misplaced = [];   // → result rows with a Snap button
@@ -1170,12 +1210,12 @@
             setProbeStatus(`⏳ Scanning ${idx + 1}/${rpps.length} via ${sourceHost(activeSource)}…`, '#06c');
             const info = getRppInfo(rpp);
             console.group(`${LOG} RPP ${info.id} — HN=${info.hn ?? '∅'} St="${info.street || '∅'}" @ (${info.lon.toFixed(6)}, ${info.lat.toFixed(6)})`);
-            let { error, points } = await queryOneSource(activeSource, info.lon, info.lat, CONFIG.queryRadiusM);
+            let { error, points } = await queryOneSource(activeSource, info.lon, info.lat, radiusM);
             if (error && activeSource.id !== STATEWIDE_SOURCE.id) {
                 console.warn(`${LOG} ${activeSource.name} failed (${error}) → falling back to ${STATEWIDE_SOURCE.name} for the rest of this scan.`);
                 usedFallback = 'error';
                 activeSource = STATEWIDE_SOURCE;
-                ({ error, points } = await queryOneSource(activeSource, info.lon, info.lat, CONFIG.queryRadiusM));
+                ({ error, points } = await queryOneSource(activeSource, info.lon, info.lat, radiusM));
             } else if (!error && !points.length && activeSource.id !== STATEWIDE_SOURCE.id) {
                 // v.44 COVERAGE-HOLE FALLBACK (Adams/Arapahoe field case).
                 // A local bbox is a RECTANGLE, so it can legitimately claim a
@@ -1191,7 +1231,7 @@
                 // spot must stay no-gis and must NOT flip the source for the
                 // rest of the scan. So prove it — only switch when statewide
                 // actually HAS points here.
-                const stateProbe = await queryOneSource(STATEWIDE_SOURCE, info.lon, info.lat, CONFIG.queryRadiusM);
+                const stateProbe = await queryOneSource(STATEWIDE_SOURCE, info.lon, info.lat, radiusM);
                 if (!stateProbe.error && stateProbe.points.length) {
                     console.warn(`${LOG} ${activeSource.name} returned 0 points where ${STATEWIDE_SOURCE.name} has ${stateProbe.points.length} → coverage hole; falling back to ${STATEWIDE_SOURCE.name} for the rest of this scan.`);
                     usedFallback = 'coverage';
@@ -1206,7 +1246,7 @@
                 continue;
             }
             const verdict = evaluateRpp(info, points);
-            console.log(`GIS: ${points.length} authoritative point(s) within ${CONFIG.queryRadiusM}m`);
+            console.log(`GIS: ${points.length} authoritative point(s) within ${radiusM}m`);
             const rppHn = rppHnString(info);
             verdict.annotated.slice(0, CONFIG.maxListedPoints).forEach((p) => {
                 const hnFlag = (rppHn != null && String(p.hn) === rppHn) ? 'HN✓' : 'HN✗';
@@ -1274,7 +1314,9 @@
         } else {
             srcDesc = `🗺️ ${activeSource.name} <b>(local)</b> · ${sourceHost(activeSource)}`;
         }
-        const foot = `<br><span style="color:#235;">${srcDesc}</span><br><span style="color:#888;">${summary}</span>`;
+        // The radius is in the footer because it changes what the verdicts MEAN
+        // — a no-gis at 60m and a no-gis at 500m are different findings.
+        const foot = `<br><span style="color:#235;">${srcDesc}</span><br><span style="color:#888;">within ${radiusM}m  ·  ${summary}</span>`;
         if (misplaced.length === 0) {
             setProbeStatus(`✅ Done ${at} — scanned ${rpps.length} RPP(s), no misplaced pins found.${foot}`, '#0a7');
         } else {
@@ -3141,6 +3183,11 @@
               <h2 style="font-size:14px;margin:6px 0;">🔬 RPP GIS Address Probe <span style="font-weight:normal;color:#888;font-size:10px;">v${SCRIPT_VERSION}</span></h2>
               <p style="color:#555;margin:4px 0 8px;">Read-only. Cross-checks each visible RPP's house number &amp; street against the authoritative GIS address points below. The only map-writing action is a reviewed <b>Snap</b>.</p>
               <div style="margin:4px 0 8px;padding:5px 8px;background:#eef6f3;border-left:3px solid #0a7;border-radius:3px;font-size:11px;color:#235;">🗺️ <b>GIS source:</b> local-first — uses the county/city service where configured (${LOCAL_SOURCE_NAMES}), otherwise the State of Colorado composite (${sourceHost(STATEWIDE_SOURCE)}). Each scan shows which it used.</div>
+              <div style="margin:4px 0 8px;font-size:11px;color:#444;">
+                Search distance:
+                <input id="rpp-gis-probe-radius" type="number" min="${CONFIG.queryRadiusMinM}" max="${CONFIG.queryRadiusMaxM}" step="10" style="width:60px;padding:2px 4px;" title="How far around each RPP to pull GIS address points (meters). Lower it in dense subdivisions; raise it in rural country where the pin can sit hundreds of meters from its point.">
+                m around each RPP <span style="color:#888;">(default ${CONFIG.queryRadiusM})</span>
+              </div>
               <button id="rpp-gis-probe-run" style="padding:7px 12px;background:#0a7;color:#fff;border:none;border-radius:5px;font-size:13px;font-weight:bold;cursor:pointer;">🔬 Probe visible RPPs</button>
               <div id="rpp-gis-probe-status" style="margin:8px 0;padding:6px 8px;background:#f3f3f3;border-radius:4px;font-size:11px;color:#444;">Idle — click <b>Probe</b> to scan the RPPs currently in view.</div>
               <div id="rpp-gis-probe-results"></div>
@@ -3148,6 +3195,12 @@
         probeStatusRef = tabPane.querySelector('#rpp-gis-probe-status');
         probeResultsRef = tabPane.querySelector('#rpp-gis-probe-results');
         probeButtonRef = tabPane.querySelector('#rpp-gis-probe-run');
+        const radiusInput = tabPane.querySelector('#rpp-gis-probe-radius');
+        radiusInput.value = probeRadiusM();
+        radiusInput.addEventListener('change', () => {
+            setProbeRadiusM(radiusInput.value);
+            radiusInput.value = probeRadiusM();          // reflect the clamped value back
+        });
         probeButtonRef.addEventListener('click', () => {
             probeVisibleRPPs().catch((e) => {
                 console.error(`${LOG} probe failed:`, e);
