@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.08.03.49';
+    const SCRIPT_VERSION = '2026.08.03.50';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -470,13 +470,23 @@
         return (source && source.county) ? source.county.toUpperCase() : null;
     }
 
-    // → county name, or null when it cannot be established. Null ALWAYS means
-    // "don't gate" — see pickSourceForView.
-    function resolveViewCounty(lon, lat) {
+    // → ARRAY of county names the scan AREA touches, or null when it cannot be
+    // established. Null ALWAYS means "don't gate" — see pickSourceForArea.
+    //
+    // ⚠️ AREA, not a point (v.50). v.49 asked "which county is this ONE spot in"
+    // and Josh immediately found the hole: on W 120th Ave the ROAD centreline is
+    // in Adams while `5005 W 120TH AVE` — a house number he wants — is in
+    // Broomfield. Road and house numbers on the SAME street can sit in different
+    // counties, so any single probe point answers a question nobody asked. His
+    // selection's corridor actually touches THREE: Adams, Broomfield, Jefferson.
+    function resolveAreaCounties(bbox) {
+        const [w, s, e, n] = bbox;
         const params = new URLSearchParams({
             f: 'json',
-            geometry: JSON.stringify({ x: lon, y: lat, spatialReference: { wkid: 4326 } }),
-            geometryType: 'esriGeometryPoint',
+            geometry: JSON.stringify({
+                xmin: w, ymin: s, xmax: e, ymax: n, spatialReference: { wkid: 4326 },
+            }),
+            geometryType: 'esriGeometryEnvelope',
             spatialRel: 'esriSpatialRelIntersects',
             inSR: '4326',
             outFields: 'County',
@@ -494,8 +504,10 @@
                     }
                     try {
                         const data = JSON.parse(res.responseText);
-                        const ft = (data.features || [])[0];
-                        resolve((ft && ft.attributes && ft.attributes.County) || null);
+                        const names = [...new Set((data.features || [])
+                            .map((ft) => ft.attributes && ft.attributes.County)
+                            .filter(Boolean))];
+                        resolve(names.length ? names : null);
                     } catch {
                         resolve(null);
                     }
@@ -506,34 +518,46 @@
         });
     }
 
-    // Choose the source for a scan: bbox first, then the county gate.
-    // Returns {source, requestedLocal, county, gate} where `gate` records WHY,
-    // so the tab can tell Josh a wrong-county rejection from a dead service.
-    async function pickSourceForView(lon, lat) {
+    // Choose the source for a scan from the AREA it covers: bbox pick first,
+    // then the county gate. Returns {source, requestedLocal, counties, gate};
+    // `gate` records WHY, so the tab can tell a wrong-county rejection from a
+    // dead service from a scan that simply straddles a line.
+    async function pickSourceForArea(bbox, lon, lat) {
         const bboxPick = pickLocalSource(lon, lat);
         if (!bboxPick) {
-            return { source: STATEWIDE_SOURCE, requestedLocal: null, county: null, gate: 'no-local' };
+            return { source: STATEWIDE_SOURCE, requestedLocal: null, counties: null, gate: 'no-local' };
         }
-        const county = await resolveViewCounty(lon, lat);
+        const counties = bbox ? await resolveAreaCounties(bbox) : null;
         // ⚠️ FAIL OPEN. 16 of Colorado's 64 counties have ZERO rows in the
-        // statewide composite (Otero, Crowley, Fremont…), and the service can
-        // simply be down. Either way the gate must not strip a working local
-        // source on no evidence — silence is not a wrong-county verdict.
-        if (!county) {
-            return { source: bboxPick, requestedLocal: bboxPick, county: null, gate: 'unverified' };
+        // statewide composite (Otero, Crowley, Fremont…), the service can be
+        // down, and a caller may have no extent to offer. The gate must not
+        // strip a working local source on no evidence — silence is not a verdict.
+        if (!counties || !counties.length) {
+            return { source: bboxPick, requestedLocal: bboxPick, counties: null, gate: 'unverified' };
         }
-        if (countyOf(bboxPick) === county.toUpperCase()) {
-            return { source: bboxPick, requestedLocal: bboxPick, county, gate: 'confirmed' };
+        // 🔑 STRADDLING A COUNTY LINE (v.50, Josh's W 120th Ave case). NO local
+        // source can serve a scan area that crosses a county boundary — each one
+        // stops at its own line, and which side the ROAD happens to fall on says
+        // nothing about which side its HOUSE NUMBERS are on. Only the statewide
+        // composite spans the line, so it wins outright. Freshness is the price;
+        // returning one county's half of a street as if it were the whole street
+        // is not an acceptable alternative.
+        if (counties.length > 1) {
+            return { source: STATEWIDE_SOURCE, requestedLocal: bboxPick, counties, gate: 'multi-county' };
+        }
+        const only = counties[0];
+        if (countyOf(bboxPick) === only.toUpperCase()) {
+            return { source: bboxPick, requestedLocal: bboxPick, counties, gate: 'confirmed' };
         }
         // Wrong jurisdiction. Another configured source may govern THIS county
         // and also cover the point — in an overlap band that is the right answer.
-        const byCounty = LOCAL_SOURCES.find((s) => countyOf(s) === county.toUpperCase()
+        const byCounty = LOCAL_SOURCES.find((s) => countyOf(s) === only.toUpperCase()
             && s.bbox && lon >= s.bbox[0] && lon <= s.bbox[2] && lat >= s.bbox[1] && lat <= s.bbox[3]);
         if (byCounty) {
-            return { source: byCounty, requestedLocal: bboxPick, county, gate: 'reassigned' };
+            return { source: byCounty, requestedLocal: bboxPick, counties, gate: 'reassigned' };
         }
         // No local source for this county (e.g. Adams, dropped in v.44) → statewide.
-        return { source: STATEWIDE_SOURCE, requestedLocal: bboxPick, county, gate: 'wrong-county' };
+        return { source: STATEWIDE_SOURCE, requestedLocal: bboxPick, counties, gate: 'wrong-county' };
     }
 
     function sourceHost(src) {
@@ -1353,16 +1377,18 @@
         const center = vb
             ? [(vb[0] + vb[2]) / 2, (vb[1] + vb[3]) / 2]
             : [getRppInfo(rpps[0]).lon, getRppInfo(rpps[0]).lat];
-        // v.49 — bbox pick + COUNTY GATE (see pickSourceForView). Async, so the
+        // v.49/.50 — bbox pick + COUNTY GATE over the VIEW EXTENT (see
+        // pickSourceForArea), not a single centre point. Async, so the
         // status line says what it's doing rather than sitting silent.
         setProbeStatus('⏳ Checking which county this view is in…', '#06c');
-        const picked = await pickSourceForView(center[0], center[1]);
-        const { requestedLocal, county: viewCounty, gate: countyGate } = picked;
+        const picked = await pickSourceForArea(vb, center[0], center[1]);
+        const { requestedLocal, counties: viewCounties, gate: countyGate } = picked;
+        const countyList = (viewCounties || []).join(' / ');
         let activeSource = picked.source;
-        let usedFallback = countyGate === 'wrong-county' ? 'county' : false;
-        if (countyGate === 'wrong-county' || countyGate === 'reassigned') {
-            console.warn(`${LOG} county gate: this view is in ${viewCounty} County, but ${requestedLocal.name}'s bbox claimed it`
-                + ` → using ${activeSource.name} instead.`);
+        let usedFallback = (countyGate === 'wrong-county' || countyGate === 'multi-county') ? countyGate : false;
+        if (usedFallback || countyGate === 'reassigned') {
+            console.warn(`${LOG} county gate [${countyGate}]: this view covers ${countyList} County,`
+                + ` ${requestedLocal.name}'s bbox claimed it → using ${activeSource.name} instead.`);
         }
         // Read the user's search distance ONCE, like the source pick — editing
         // the box mid-scan must not make some RPPs answer at a different radius.
@@ -1482,8 +1508,10 @@
             // governs the wrong county. Saying "unavailable" or "no data here"
             // would both be false and would misdirect the next investigation.
             let why;
-            if (usedFallback === 'county') {
-                why = `this view is in ${viewCounty} County, not ${requestedLocal.county}`;
+            if (usedFallback === 'multi-county') {
+                why = `this view straddles ${countyList} — no local source spans a county line`;
+            } else if (usedFallback === 'wrong-county') {
+                why = `this view is in ${countyList} County, not ${requestedLocal.county}`;
             } else if (usedFallback === 'coverage') {
                 why = `${requestedLocal.name} has no data here`;
             } else {
@@ -1494,7 +1522,7 @@
             srcDesc = `🗺️ ${STATEWIDE_SOURCE.name} · ${sourceHost(STATEWIDE_SOURCE)} <span style="color:#888;">(no local source configured for this area)</span>`;
         } else {
             const gateNote = countyGate === 'reassigned'
-                ? ` <span style="color:#888;">(county gate: ${viewCounty} County — ${requestedLocal.name}'s bbox claimed this spot)</span>`
+                ? ` <span style="color:#888;">(county gate: ${countyList} County — ${requestedLocal.name}'s bbox claimed this spot)</span>`
                 : (countyGate === 'unverified' ? ' <span style="color:#888;">(county unconfirmed)</span>' : '');
             srcDesc = `🗺️ ${activeSource.name} <b>(local)</b> · ${sourceHost(activeSource)}${gateNote}`;
         }
@@ -1922,17 +1950,20 @@
         // service answered 188 points for the far side of the county line, and
         // the merge/fallback machinery below could not help because it all keys
         // off the local source being empty or erroring. It was neither.
-        const picked = await pickSourceForView(mid[0], mid[1]);
+        // v.50 — the gate judges the SCAN AREA, not the road. Josh's W 120th Ave
+        // case is the reason: the centreline is in Adams while `5005 W 120TH AVE`
+        // is in Broomfield, so probing the road alone answers the wrong question.
+        const picked = await pickSourceForArea(scanBbox, mid[0], mid[1]);
         const requestedLocal = picked.source.id === STATEWIDE_SOURCE.id ? null : picked.source;
         const countyGate = picked.gate;
-        const viewCounty = picked.county;
-        if (countyGate === 'wrong-county' || countyGate === 'reassigned') {
-            console.warn(`${HN_LOG} county gate: this selection is in ${viewCounty} County, but ${picked.requestedLocal.name}'s`
-                + ` bbox claimed it → using ${picked.source.name} instead.`);
+        const countyList = (picked.counties || []).join(' / ');
+        if (countyGate === 'wrong-county' || countyGate === 'reassigned' || countyGate === 'multi-county') {
+            console.warn(`${HN_LOG} county gate [${countyGate}]: this selection covers ${countyList} County,`
+                + ` ${picked.requestedLocal.name}'s bbox claimed it → using ${picked.source.name} instead.`);
         }
         // Every return below carries the gate verdict so the status line can
         // explain a wrong-county reassignment instead of silently swapping sources.
-        const withGate = (r) => ({ ...r, countyGate, viewCounty, gatedFrom: picked.requestedLocal });
+        const withGate = (r) => ({ ...r, countyGate, countyList, gatedFrom: picked.requestedLocal });
         const radius = hnQueryRadiusM();
         if (requestedLocal) {
             const local = await querySamplesWithSource(segInfos, requestedLocal, radius, scanBbox);
@@ -2699,13 +2730,17 @@
             const at = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
             const streets = [...new Set(segInfos.map((s) => s.streetName))].join(', ');
             let srcDesc;
-            if (gis.countyGate === 'wrong-county') {
-                // v.49 — the loudest of the three: a healthy neighbouring-county
-                // service WAS about to answer, with its own streets.
-                srcDesc = `${STATEWIDE_SOURCE.name} — county gate: this selection is in ${gis.viewCounty} County, `
+            if (gis.countyGate === 'multi-county') {
+                // v.50 — the common one at a county line, and the one Josh hit.
+                srcDesc = `${STATEWIDE_SOURCE.name} — county gate: this selection straddles ${gis.countyList}, `
+                    + `and no local source spans a county line · ${sourceHost(STATEWIDE_SOURCE)}`;
+            } else if (gis.countyGate === 'wrong-county') {
+                // v.49 — a healthy neighbouring-county service WAS about to
+                // answer, with its own streets.
+                srcDesc = `${STATEWIDE_SOURCE.name} — county gate: this selection is in ${gis.countyList} County, `
                     + `not ${gis.gatedFrom.county} (${gis.gatedFrom.name}'s bbox claimed it) · ${sourceHost(STATEWIDE_SOURCE)}`;
             } else if (gis.countyGate === 'reassigned') {
-                srcDesc = `${gis.source.name} (local) — county gate: ${gis.viewCounty} County, `
+                srcDesc = `${gis.source.name} (local) — county gate: ${gis.countyList} County, `
                     + `reassigned from ${gis.gatedFrom.name} · ${sourceHost(gis.source)}`;
             } else if (gis.usedFallback) {
                 srcDesc = `${STATEWIDE_SOURCE.name} — fallback · ${sourceHost(STATEWIDE_SOURCE)}`;
