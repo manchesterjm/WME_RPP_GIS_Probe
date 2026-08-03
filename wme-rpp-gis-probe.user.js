@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.08.03.46';
+    const SCRIPT_VERSION = '2026.08.03.47';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -446,7 +446,12 @@
         // at/near the structure whatever the driveway length, so beyond this
         // the pin is misplaced even with no closer neighbor. (100 → 50 same
         // day: field pin ~90-105m out sat at the 100 cap edge; Josh set 30 — the
+        // DEFAULT only as of v.47: this is THE distance Josh reviews by — how far
+        // the pin sits from where GIS says the address is — so the 🔬 tab has a
+        // user-editable "Flag as misplaced beyond" field (persisted).
         farOwnM: 30,
+        farOwnMinM: 1,         // sanity clamps for the user field
+        farOwnMaxM: 1000,
         wellPlacedM: 12,       // fast-path: matched point this close → definitely on the right lot, skip the neighbor check
         misplacedMarginM: 8,   // a DIFFERENT address must be at least this much closer than the RPP's own point to call it misplaced (robust to rooftop-vs-frontyard offset; tune up = more conservative)
         wrongHnCloseM: 8,      // a *different*-HN point this close suggests the RPP's HN is wrong
@@ -1036,7 +1041,10 @@
         return (info.hn != null && String(info.hn).trim() !== '') ? String(info.hn).trim() : null;
     }
 
-    function evaluateRpp(info, points) {
+    // `farCap` = how far the pin may sit from its OWN GIS point before it's
+    // called misplaced. User-set in the 🔬 tab (v.47); defaulted so a console
+    // call still behaves like it always did.
+    function evaluateRpp(info, points, farCap = CONFIG.farOwnM) {
         const annotated = points
             .map((p) => ({
                 ...p,
@@ -1057,7 +1065,10 @@
         if (hnStreetMatches.length) {
             const own = hnStreetMatches[0];
             // Fast path: matched point essentially on top of the RPP → definitely the right lot.
-            if (own.dist <= CONFIG.wellPlacedM) {
+            // Never let it out-rank a TIGHTER user cap: with the cap at 8m a pin
+            // 10m out has to flag, not pass on a 12m fast path it never saw.
+            const wellPlacedM = Math.min(CONFIG.wellPlacedM, farCap);
+            if (own.dist <= wellPlacedM) {
                 return { code: 'ok', msg: `HN ${rppHn} correct & well-placed — ${own.dist.toFixed(1)}m from "${own.address}"`, target: own, annotated };
             }
             // Nearest-point rule: if a DIFFERENT address sits clearly closer than the RPP's own
@@ -1076,10 +1087,10 @@
             // Sparse-country cap (v.23): own-point-nearest is no excuse beyond
             // farOwnM — with no neighbors for 100m+, a badly misplaced rural pin
             // otherwise verdicts `ok` (Mesa Co 2026-07-21).
-            if (own.dist > CONFIG.farOwnM) {
+            if (own.dist > farCap) {
                 return {
                     code: 'misplaced',
-                    msg: `MISPLACED — pin is ${own.dist.toFixed(1)}m from its own "${own.address}" (beyond the ${CONFIG.farOwnM}m cap; no other address nearer); correct location (${own.lon.toFixed(6)}, ${own.lat.toFixed(6)})`,
+                    msg: `MISPLACED — pin is ${own.dist.toFixed(1)}m from its own "${own.address}" (beyond the ${farCap}m cap; no other address nearer); correct location (${own.lon.toFixed(6)}, ${own.lat.toFixed(6)})`,
                     target: own,
                     annotated,
                 };
@@ -1164,6 +1175,38 @@
         } catch { /* private mode etc. — session keeps the default */ }
     }
 
+    // User-adjustable MISPLACEMENT tolerance (v.47, Josh's actual ask): how far
+    // the pin may sit from where GIS says its address is before it's flagged.
+    // Distinct from the search radius above — that one decides which points get
+    // FETCHED, this one decides which pins get FLAGGED.
+    const PROBE_FAR_STORE = 'rppProbe.farOwnM';
+
+    function clampProbeFarOwn(v) {
+        // Blank means "default", not "the smallest legal value" — Number('') is
+        // 0 and finite, so a cleared box would otherwise flag every pin.
+        const s = String(v).trim();
+        const n = Math.round(Number(s));
+        if (!s || !isFinite(n)) {
+            return CONFIG.farOwnM;
+        }
+        return Math.min(CONFIG.farOwnMaxM, Math.max(CONFIG.farOwnMinM, n));
+    }
+
+    function probeFarOwnM() {
+        try {
+            const saved = localStorage.getItem(PROBE_FAR_STORE);
+            return saved == null ? CONFIG.farOwnM : clampProbeFarOwn(saved);
+        } catch {
+            return CONFIG.farOwnM;
+        }
+    }
+
+    function setProbeFarOwnM(v) {
+        try {
+            localStorage.setItem(PROBE_FAR_STORE, String(clampProbeFarOwn(v)));
+        } catch { /* private mode etc. — session keeps the default */ }
+    }
+
     async function probeVisibleRPPs() {
         const zoom = getZoom();
         if (zoom != null && zoom < CONFIG.minZoom) {
@@ -1195,7 +1238,8 @@
         // Read the user's search distance ONCE, like the source pick — editing
         // the box mid-scan must not make some RPPs answer at a different radius.
         const radiusM = probeRadiusM();
-        console.log(`%c${LOG} probing ${rpps.length} visible RPP(s) vs ${activeSource.name} [${sourceHost(activeSource)}] within ${radiusM}m — READ-ONLY, no edits.`, 'color:#0a7;font-weight:bold');
+        const farCapM = probeFarOwnM();
+        console.log(`%c${LOG} probing ${rpps.length} visible RPP(s) vs ${activeSource.name} [${sourceHost(activeSource)}] within ${radiusM}m, misplaced beyond ${farCapM}m — READ-ONLY, no edits.`, 'color:#0a7;font-weight:bold');
 
         const tally = {};
         const misplaced = [];   // → result rows with a Snap button
@@ -1245,7 +1289,7 @@
                 console.groupEnd();
                 continue;
             }
-            const verdict = evaluateRpp(info, points);
+            const verdict = evaluateRpp(info, points, farCapM);
             console.log(`GIS: ${points.length} authoritative point(s) within ${radiusM}m`);
             const rppHn = rppHnString(info);
             verdict.annotated.slice(0, CONFIG.maxListedPoints).forEach((p) => {
@@ -1314,9 +1358,10 @@
         } else {
             srcDesc = `🗺️ ${activeSource.name} <b>(local)</b> · ${sourceHost(activeSource)}`;
         }
-        // The radius is in the footer because it changes what the verdicts MEAN
-        // — a no-gis at 60m and a no-gis at 500m are different findings.
-        const foot = `<br><span style="color:#235;">${srcDesc}</span><br><span style="color:#888;">within ${radiusM}m  ·  ${summary}</span>`;
+        // Both distances are in the footer because they change what the verdicts
+        // MEAN — a no-gis at 60m and a no-gis at 500m are different findings, and
+        // so are "no misplaced pins" at a 30m cap and at a 100m one.
+        const foot = `<br><span style="color:#235;">${srcDesc}</span><br><span style="color:#888;">search ${radiusM}m  ·  misplaced &gt;${farCapM}m  ·  ${summary}</span>`;
         if (misplaced.length === 0) {
             setProbeStatus(`✅ Done ${at} — scanned ${rpps.length} RPP(s), no misplaced pins found.${foot}`, '#0a7');
         } else {
@@ -3183,10 +3228,16 @@
               <h2 style="font-size:14px;margin:6px 0;">🔬 RPP GIS Address Probe <span style="font-weight:normal;color:#888;font-size:10px;">v${SCRIPT_VERSION}</span></h2>
               <p style="color:#555;margin:4px 0 8px;">Read-only. Cross-checks each visible RPP's house number &amp; street against the authoritative GIS address points below. The only map-writing action is a reviewed <b>Snap</b>.</p>
               <div style="margin:4px 0 8px;padding:5px 8px;background:#eef6f3;border-left:3px solid #0a7;border-radius:3px;font-size:11px;color:#235;">🗺️ <b>GIS source:</b> local-first — uses the county/city service where configured (${LOCAL_SOURCE_NAMES}), otherwise the State of Colorado composite (${sourceHost(STATEWIDE_SOURCE)}). Each scan shows which it used.</div>
+              <div style="margin:4px 0 8px;padding:5px 8px;background:#fff7ec;border-left:3px solid #e0a030;border-radius:3px;font-size:11px;color:#444;">
+                <b>Flag as misplaced beyond</b>
+                <input id="rpp-gis-probe-farown" type="number" min="${CONFIG.farOwnMinM}" max="${CONFIG.farOwnMaxM}" step="5" style="width:60px;padding:2px 4px;" title="How far the RPP pin may sit from where GIS says its address is, before the probe calls it misplaced (meters). Lower it to catch smaller errors; raise it on rural lots where a long driveway is normal.">
+                m from its GIS point <span style="color:#888;">(default ${CONFIG.farOwnM})</span>
+                <div style="margin-top:3px;color:#777;">A pin with a <i>different</i> address clearly nearer still flags at any setting.</div>
+              </div>
               <div style="margin:4px 0 8px;font-size:11px;color:#444;">
-                Search distance:
-                <input id="rpp-gis-probe-radius" type="number" min="${CONFIG.queryRadiusMinM}" max="${CONFIG.queryRadiusMaxM}" step="10" style="width:60px;padding:2px 4px;" title="How far around each RPP to pull GIS address points (meters). Lower it in dense subdivisions; raise it in rural country where the pin can sit hundreds of meters from its point.">
-                m around each RPP <span style="color:#888;">(default ${CONFIG.queryRadiusM})</span>
+                GIS search radius:
+                <input id="rpp-gis-probe-radius" type="number" min="${CONFIG.queryRadiusMinM}" max="${CONFIG.queryRadiusMaxM}" step="10" style="width:60px;padding:2px 4px;" title="How far around each RPP to PULL GIS address points (meters) — not a tolerance. Keep it comfortably above the misplaced cap, or a badly-off pin's own point is never fetched and it reports no-gis instead of misplaced.">
+                m <span style="color:#888;">(default ${CONFIG.queryRadiusM} — how far to LOOK, not a tolerance)</span>
               </div>
               <button id="rpp-gis-probe-run" style="padding:7px 12px;background:#0a7;color:#fff;border:none;border-radius:5px;font-size:13px;font-weight:bold;cursor:pointer;">🔬 Probe visible RPPs</button>
               <div id="rpp-gis-probe-status" style="margin:8px 0;padding:6px 8px;background:#f3f3f3;border-radius:4px;font-size:11px;color:#444;">Idle — click <b>Probe</b> to scan the RPPs currently in view.</div>
@@ -3196,10 +3247,16 @@
         probeResultsRef = tabPane.querySelector('#rpp-gis-probe-results');
         probeButtonRef = tabPane.querySelector('#rpp-gis-probe-run');
         const radiusInput = tabPane.querySelector('#rpp-gis-probe-radius');
+        const farOwnInput = tabPane.querySelector('#rpp-gis-probe-farown');
         radiusInput.value = probeRadiusM();
+        farOwnInput.value = probeFarOwnM();
         radiusInput.addEventListener('change', () => {
             setProbeRadiusM(radiusInput.value);
             radiusInput.value = probeRadiusM();          // reflect the clamped value back
+        });
+        farOwnInput.addEventListener('change', () => {
+            setProbeFarOwnM(farOwnInput.value);
+            farOwnInput.value = probeFarOwnM();
         });
         probeButtonRef.addEventListener('click', () => {
             probeVisibleRPPs().catch((e) => {
