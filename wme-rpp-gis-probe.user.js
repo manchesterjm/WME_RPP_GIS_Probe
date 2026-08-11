@@ -38,7 +38,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'WME RPP GIS Address Probe';
-    const SCRIPT_VERSION = '2026.08.03.50';
+    const SCRIPT_VERSION = '2026.08.11.51';
     const LOG = '🔬 [RPP-GIS-Probe]';
     const HN_LOG = '🔢 [HN-Filler]';
 
@@ -313,6 +313,69 @@
                 zip: '',
                 subtype: '',
             }),
+        },
+        {
+            id: 'steamboat',
+            name: 'City of Steamboat Springs',
+            county: 'Routt',   // statewide composite's own spelling — the county gate compares against this
+            // ⚠️ 2026-08-11 (Josh: "not finding addresses in Routt County"): the
+            // county source below and the statewide composite BOTH hold ZERO
+            // addresses inside Steamboat city limits — measured 0 within 800 m of
+            // downtown from each, while this layer returned 500 (its cap). The
+            // county layer's own JDX values are ROUTT / HAYDEN / OAK CREEK /
+            // YAMPA / OUT OF THE COUNTY — there is no Steamboat jurisdiction,
+            // because the CITY does its own addressing; and the statewide row
+            // count for Routt (8,435) is essentially the county layer (8,470),
+            // i.e. the state aggregate inherits the same hole. No fallback could
+            // have covered this: v.44 needs statewide to HAVE points where the
+            // local source returned zero, and statewide is zero here too.
+            // LISTED BEFORE routt (most-specific-first) so the city wins its own
+            // ground; its bbox is the layer's real data extent, which reaches
+            // past the city limits into the UGB.
+            url: 'https://maps.steamboatsprings.net/arcgis/rest/services/Base/InteractiveMapBase/MapServer/1/query',
+            bbox: [-107.0746, 40.2968, -106.6616, 40.6040],
+            fields: (a) => {
+                // Same disease as Bayfield/La Plata (v.43): the 3,705 records
+                // OUTSIDE city limits leave AddrNum NULL, so reading that column
+                // alone would resolve them to a correct street with an EMPTY hn —
+                // invisible rather than broken. AddrNumFull is the column to
+                // trust: populated on all 10,944 rows (measured), and it is also
+                // the ONLY one that carries the half-number suffix — the eight
+                // "1/2" addresses are 502 vs "502 1/2" Pine St, genuinely
+                // different properties that AddrNum alone would collapse into
+                // one. AddrFull stays as composeHn's last resort.
+                const hn = composeHn(a.AddrNumFull ?? a.AddrNum, a.AddrFull);
+                const recovered = composeStreetFromFull(a.AddrFull);
+                return {
+                    hn,
+                    // 25 records carry no street name at all AND their AddrFull
+                    // is the bare house number ("28440"), which leaves
+                    // composeStreetFromFull nothing to strip — it hands the
+                    // number straight back as though it were a road name. Emit
+                    // no street there so the point is skipped, rather than
+                    // inventing a street called "28440" for the matcher to
+                    // puzzle over. (The same latent shape exists in other
+                    // sources; pre-existing, flagged, not touched here.)
+                    street: a.StreetNameFull || (recovered === hn ? '' : recovered),
+                    address: a.AddrFull || '',
+                    // The layer publishes NO site city or site ZIP (MailingCity /
+                    // MailingZipCode are the OWNER's mailing address — a
+                    // different place entirely, never the address's own).
+                    // CityLimits is a coded 1/0 with no nulls, so it can answer
+                    // the city question honestly for the 7,239 inside and stay
+                    // SILENT for the 3,705 unincorporated ones rather than
+                    // labelling them Steamboat.
+                    city: a.CityLimits === 1 ? 'Steamboat Springs' : '',
+                    zip: '',
+                    subtype: a.PropertyType || '',
+                };
+            },
+            // ⛔ No status filter, deliberately. AddressCurrent is 1 on 7,143,
+            // NULL on 3,711 (the whole outside-city band) and 0 on 90 — and the
+            // 90 are ordinary occupied addresses on real streets (613 Oak St,
+            // 2510 Cattle Kate Cir), not retirements: only 19 rows in the entire
+            // layer carry an AddrEndDate. Filtering on it would delete the
+            // unincorporated band outright.
         },
         {
             id: 'routt',
@@ -1120,12 +1183,25 @@
         return joined || composeStreetFromFull(a.AddrFull);
     }
 
-    // Query ONE source's address-point service around (lon,lat). Resolves to
-    // { error, points: [{hn, street, address, city, zip, subtype, lon, lat}] }.
-    // outFields=* so each source's own field names are available to its fields()
-    // mapper; we query inSR=outSR=4326 so any native SR (State Plane, etc.) is
-    // reprojected to WGS84 server-side for distance math.
-    function queryOneSource(source, lon, lat, radiusMeters) {
+    // ArcGIS caps a single response at the layer's own maxRecordCount and returns
+    // the first N **by object id — NOT the nearest N**, so a truncated answer is a
+    // silently WRONG answer rather than merely a small one: the probe's nearest-
+    // point rule could miss an RPP's own point entirely and call it misplaced or
+    // no-gis. Caps vary widely (Steamboat's city layer 500, most others 2000), and
+    // the probe's search radius goes to 2000 m, so this is reachable in any dense
+    // downtown. Page until the service stops setting exceededTransferLimit.
+    // Verified live 2026-08-11 against Steamboat: offsets 0/500/1000 come back
+    // ascending by OBJECTID with ZERO overlap and no orderByFields needed.
+    const QUERY_PAGE_SIZE = 2000;   // requested; a service may cap it lower, which is fine
+    const QUERY_MAX_PAGES = 10;     // hard stop — see queryOneSource's cap error
+
+    // Query ONE page of a source's address-point service around (lon,lat).
+    // Resolves to { error, points: [...], more } where `more` means the service
+    // says there is another page. outFields=* so each source's own field names
+    // are available to its fields() mapper; we query inSR=outSR=4326 so any
+    // native SR (State Plane, etc.) is reprojected to WGS84 server-side for
+    // distance math.
+    function queryOneSourcePage(source, lon, lat, radiusMeters, offset) {
         const params = new URLSearchParams({
             f: 'json',
             where: '1=1',
@@ -1138,6 +1214,8 @@
             spatialRel: 'esriSpatialRelIntersects',
             outFields: '*',
             returnGeometry: 'true',
+            resultOffset: String(offset),
+            resultRecordCount: String(QUERY_PAGE_SIZE),
         });
         return new Promise((resolve) => {
             GM_xmlhttpRequest({
@@ -1169,15 +1247,46 @@
                                 lat: ft.geometry ? ft.geometry.y : null,
                             };
                         });
-                        resolve({ error: null, points });
+                        resolve({ error: null, points, more: data.exceededTransferLimit === true });
                     } catch (e) {
-                        resolve({ error: `parse error: ${e.message}`, points: [] });
+                        resolve({ error: `parse error: ${e.message}`, points: [], more: false });
                     }
                 },
-                onerror: () => resolve({ error: 'network error (check @connect grant)', points: [] }),
-                ontimeout: () => resolve({ error: 'timeout', points: [] }),
+                onerror: () => resolve({ error: 'network error (check @connect grant)', points: [], more: false }),
+                ontimeout: () => resolve({ error: 'timeout', points: [], more: false }),
             });
         });
+    }
+
+    // Every page of the above, concatenated. Resolves to
+    // { error, points: [{hn, street, address, city, zip, subtype, lon, lat}] }.
+    // ⛔ Hitting the page cap is reported as an ERROR, not as a short list: the
+    // pages arrive in object-id order, so a partial set is NOT "the nearest ones"
+    // and every verdict drawn from it would be unsound. An explicit error routes
+    // through the existing fallback/reporting machinery instead of quietly
+    // answering from half the data.
+    async function queryOneSource(source, lon, lat, radiusMeters) {
+        const points = [];
+        let offset = 0;
+        for (let page = 0; page < QUERY_MAX_PAGES; page += 1) {
+            // Sequential by necessity, not by oversight: each offset is the
+            // running total of what the pages before it actually delivered.
+            const res = await queryOneSourcePage(source, lon, lat, radiusMeters, offset);
+            if (res.error) {
+                return { error: res.error, points: [] };
+            }
+            points.push(...res.points);
+            // A service that claims another page while returning none of its own
+            // would spin here forever — treat an empty page as the end.
+            if (!res.more || res.points.length === 0) {
+                return { error: null, points };
+            }
+            offset += res.points.length;
+        }
+        return {
+            error: `too many points here (over ${offset} within ${radiusMeters} m) — narrow the search distance`,
+            points: [],
+        };
     }
 
     // ---- verdict logic --------------------------------------------------------
